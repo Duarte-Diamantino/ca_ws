@@ -1,0 +1,67 @@
+<?xml version="1.0"?>
+<!--
+  Mundo da pista para o Gazebo Fortress. Frame do mundo = frame "map" do ROS.
+  O chao tem a imagem do mapa (pickup_description/maps/map_200.pgm) na mesma posicao
+  que o map_server a publica (map.yaml: resolucao 0.0121, origem [-1.2, -0.75]).
+  O launch (ca_gazebo/launch/gazebo.launch.py) acrescenta os obstaculos no marcador abaixo.
+-->
+<sdf version="1.8">
+  <world name="pista">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+    <plugin filename="ignition-gazebo-physics-system" name="ignition::gazebo::systems::Physics"/>
+    <plugin filename="ignition-gazebo-user-commands-system" name="ignition::gazebo::systems::UserCommands"/>
+    <plugin filename="ignition-gazebo-scene-broadcaster-system" name="ignition::gazebo::systems::SceneBroadcaster"/>
+
+    <scene>
+      <ambient>0.7 0.7 0.7 1</ambient>
+      <background>0.75 0.82 0.9 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <light type="directional" name="sol">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <model name="chao">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material>
+            <ambient>0.45 0.45 0.45 1</ambient>
+            <diffuse>0.45 0.45 0.45 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- imagem do mapa: 778 x 536 px * 0.0121 m = 9.414 x 6.486 m, centro em (3.507, 2.493) -->
+    <model name="mapa">
+      <static>true</static>
+      <pose>3.5069 2.4928 0.002 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>9.4138 6.4856</size></plane></geometry>
+          <material>
+            <ambient>1 1 1 1</ambient>
+            <diffuse>1 1 1 1</diffuse>
+            <pbr><metal><albedo_map>media/pista.png</albedo_map></metal></pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- OBSTACULOS -->
+  </world>
+</sdf>

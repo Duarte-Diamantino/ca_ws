@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ca_sim</name>
+  <version>0.1.0</version>
+  <description>Carro simulado (modelo bicicleta ou Gazebo Fortress via ca_gazebo) e testes em circuito fechado do MPC/DWA.</description>
+  <maintainer email="duarte.antonio.eu@gmail.com">Duarte Diamantino</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>pickup_description</exec_depend>
+  <exec_depend>obstacle_publisher</exec_depend>
+  <exec_depend>mpc_python</exec_depend>
+  <exec_depend>dwa_follower</exec_depend>
+  <exec_depend>ca_gazebo</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

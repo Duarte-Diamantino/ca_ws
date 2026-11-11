@@ -1,0 +1,190 @@
+<?xml version="1.0"?>
+<!--
+  Carro 1/10 para o Gazebo Fortress (ignition-gazebo 6).
+
+  Medidas: distancia entre eixos igual a dos controladores (0.335 m); bitola, raio das
+  rodas e massas sao estimativas de um carro 1/10 -> CONFIRMAR NO CARRO REAL.
+
+  base_link = centro do eixo traseiro, a altura dos eixos (e a referencia do modelo
+  bicicleta usado pelo MPC/DWA e pelo kinematic_sim).
+
+  Atuacao "tipo VESC" (sem ros2_control):
+    - rodas de tras: JointController (velocidade imposta)     <- $(arg cmd_prefix)/wheel_rear_{left,right}  [rad/s]
+    - direcao:       JointPositionController (servo com velocidade maxima servo_rate)
+                                                               <- $(arg cmd_prefix)/steer_{left,right}       [rad]
+  O no ca_sim/vesc_to_gz converte /commands/motor/speed e /commands/servo/position nestes comandos.
+  (O plugin AckermannSteering do Fortress tem o ganho da direcao fixo em 1 -> servo com ~1 s de atraso.)
+
+  Sensores de "verdade": OdometryPublisher (pose do modelo no mundo = frame map, faz de EKF)
+  e JointStatePublisher.
+-->
+<robot name="ca_car" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="wheelbase" default="0.335"/>
+  <xacro:arg name="track" default="0.25"/>
+  <xacro:arg name="wheel_radius" default="0.05"/>
+  <xacro:arg name="steer_limit" default="0.55"/>
+  <xacro:arg name="servo_rate" default="6.0"/>
+  <xacro:arg name="cmd_prefix" default="/ca_car/cmd"/>
+  <xacro:arg name="gz_prefix" default="/ca_car"/>
+
+  <xacro:property name="L" value="$(arg wheelbase)"/>
+  <xacro:property name="W" value="$(arg track)"/>
+  <xacro:property name="r" value="$(arg wheel_radius)"/>
+  <xacro:property name="steer_limit" value="$(arg steer_limit)"/>
+  <xacro:property name="mu" value="1.0"/>
+  <xacro:property name="m_chassis" value="3.0"/>
+  <xacro:property name="m_wheel" value="0.15"/>
+  <xacro:property name="m_knuckle" value="0.05"/>
+  <xacro:property name="chassis_l" value="0.45"/>
+  <xacro:property name="chassis_w" value="0.20"/>
+  <xacro:property name="chassis_h" value="0.06"/>
+
+  <material name="carrocaria"><color rgba="0.10 0.45 0.85 1"/></material>
+  <material name="pneu"><color rgba="0.08 0.08 0.08 1"/></material>
+  <material name="frente"><color rgba="0.95 0.75 0.10 1"/></material>
+
+  <!-- referencia: centro do eixo traseiro (sem massa, para o KDL nao se queixar) -->
+  <link name="base_link"/>
+
+  <link name="chassis">
+    <inertial>
+      <mass value="${m_chassis}"/>
+      <inertia ixx="${m_chassis * (chassis_w**2 + chassis_h**2) / 12}" ixy="0" ixz="0"
+               iyy="${m_chassis * (chassis_l**2 + chassis_h**2) / 12}" iyz="0"
+               izz="${m_chassis * (chassis_l**2 + chassis_w**2) / 12}"/>
+    </inertial>
+    <visual>
+      <geometry><box size="${chassis_l} ${chassis_w} ${chassis_h}"/></geometry>
+      <material name="carrocaria"/>
+    </visual>
+    <!-- marca na frente, para se ver a orientacao -->
+    <visual>
+      <origin xyz="${chassis_l / 2 - 0.03} 0 ${chassis_h / 2 + 0.01}"/>
+      <geometry><box size="0.06 ${chassis_w} 0.02"/></geometry>
+      <material name="frente"/>
+    </visual>
+    <collision>
+      <geometry><box size="${chassis_l} ${chassis_w} ${chassis_h}"/></geometry>
+    </collision>
+  </link>
+  <joint name="chassis_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="chassis"/>
+    <origin xyz="${L / 2} 0 0.03"/>
+  </joint>
+
+  <!-- roda: visual cilindro, colisao esfera (rola sem os problemas de contacto cilindro-plano) -->
+  <xacro:macro name="wheel" params="name">
+    <link name="${name}">
+      <inertial>
+        <mass value="${m_wheel}"/>
+        <inertia ixx="${0.4 * m_wheel * r * r}" ixy="0" ixz="0"
+                 iyy="${0.4 * m_wheel * r * r}" iyz="0" izz="${0.4 * m_wheel * r * r}"/>
+      </inertial>
+      <visual>
+        <origin rpy="${pi / 2} 0 0"/>
+        <geometry><cylinder radius="${r}" length="0.04"/></geometry>
+        <material name="pneu"/>
+      </visual>
+      <collision>
+        <geometry><sphere radius="${r}"/></geometry>
+      </collision>
+    </link>
+    <gazebo reference="${name}">
+      <mu1>${mu}</mu1>
+      <mu2>${mu}</mu2>
+    </gazebo>
+  </xacro:macro>
+
+  <!-- rodas de tras (motrizes) -->
+  <xacro:macro name="rear_wheel" params="side y">
+    <xacro:wheel name="rear_${side}_wheel"/>
+    <joint name="rear_${side}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="rear_${side}_wheel"/>
+      <origin xyz="0 ${y} 0"/>
+      <axis xyz="0 1 0"/>
+      <limit effort="10" velocity="250"/>
+    </joint>
+  </xacro:macro>
+  <xacro:rear_wheel side="left" y="${W / 2}"/>
+  <xacro:rear_wheel side="right" y="${-W / 2}"/>
+
+  <!-- rodas da frente: manga de eixo (direcao) + roda livre -->
+  <xacro:macro name="front_wheel" params="side y">
+    <link name="front_${side}_knuckle">
+      <inertial>
+        <mass value="${m_knuckle}"/>
+        <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+      </inertial>
+    </link>
+    <joint name="front_${side}_steering_joint" type="revolute">
+      <parent link="base_link"/>
+      <child link="front_${side}_knuckle"/>
+      <origin xyz="${L} ${y} 0"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="${-steer_limit}" upper="${steer_limit}" effort="5" velocity="$(arg servo_rate)"/>
+    </joint>
+    <xacro:wheel name="front_${side}_wheel"/>
+    <joint name="front_${side}_wheel_joint" type="continuous">
+      <parent link="front_${side}_knuckle"/>
+      <child link="front_${side}_wheel"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+  <xacro:front_wheel side="left" y="${W / 2}"/>
+  <xacro:front_wheel side="right" y="${-W / 2}"/>
+
+  <gazebo>
+    <!-- servo: vai para o angulo pedido a no maximo servo_rate rad/s -->
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>front_left_steering_joint</joint_name>
+      <topic>$(arg cmd_prefix)/steer_left</topic>
+      <p_gain>20</p_gain>
+      <i_gain>0</i_gain>
+      <d_gain>0</d_gain>
+      <use_velocity_commands>true</use_velocity_commands>
+      <cmd_max>$(arg servo_rate)</cmd_max>
+      <cmd_min>-$(arg servo_rate)</cmd_min>
+    </plugin>
+    <plugin filename="ignition-gazebo-joint-position-controller-system"
+            name="ignition::gazebo::systems::JointPositionController">
+      <joint_name>front_right_steering_joint</joint_name>
+      <topic>$(arg cmd_prefix)/steer_right</topic>
+      <p_gain>20</p_gain>
+      <i_gain>0</i_gain>
+      <d_gain>0</d_gain>
+      <use_velocity_commands>true</use_velocity_commands>
+      <cmd_max>$(arg servo_rate)</cmd_max>
+      <cmd_min>-$(arg servo_rate)</cmd_min>
+    </plugin>
+    <!-- motor: velocidade angular imposta as rodas de tras -->
+    <plugin filename="ignition-gazebo-joint-controller-system"
+            name="ignition::gazebo::systems::JointController">
+      <joint_name>rear_left_wheel_joint</joint_name>
+      <topic>$(arg cmd_prefix)/wheel_rear_left</topic>
+      <initial_velocity>0.0</initial_velocity>
+    </plugin>
+    <plugin filename="ignition-gazebo-joint-controller-system"
+            name="ignition::gazebo::systems::JointController">
+      <joint_name>rear_right_wheel_joint</joint_name>
+      <topic>$(arg cmd_prefix)/wheel_rear_right</topic>
+      <initial_velocity>0.0</initial_velocity>
+    </plugin>
+    <!-- "EKF perfeito": pose do modelo no mundo (frame map) -->
+    <plugin filename="ignition-gazebo-odometry-publisher-system"
+            name="ignition::gazebo::systems::OdometryPublisher">
+      <odom_frame>map</odom_frame>
+      <robot_base_frame>base_link</robot_base_frame>
+      <odom_topic>$(arg gz_prefix)/odometry</odom_topic>
+      <tf_topic>$(arg gz_prefix)/tf</tf_topic>
+      <odom_publish_frequency>50</odom_publish_frequency>
+      <dimensions>2</dimensions>
+    </plugin>
+    <plugin filename="ignition-gazebo-joint-state-publisher-system"
+            name="ignition::gazebo::systems::JointStatePublisher">
+      <topic>$(arg gz_prefix)/joint_states</topic>
+    </plugin>
+  </gazebo>
+</robot>

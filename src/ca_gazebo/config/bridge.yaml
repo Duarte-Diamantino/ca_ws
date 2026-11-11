@@ -1,0 +1,53 @@
+# ros_gz_bridge: topicos entre o Gazebo (ignition.msgs) e o ROS 2.
+# Os nomes do lado Gazebo vem do URDF (ca_gazebo/urdf/ca_car.urdf.xacro).
+
+# relogio da simulacao (os nos com use_sim_time:=true usam-no)
+- ros_topic_name: /clock
+  gz_topic_name: /clock
+  ros_type_name: rosgraph_msgs/msg/Clock
+  gz_type_name: ignition.msgs.Clock
+  direction: GZ_TO_ROS
+
+# pose "verdadeira" do carro -> faz de EKF (/odometry/filtered, frame map)
+- ros_topic_name: /odometry/filtered
+  gz_topic_name: /ca_car/odometry
+  ros_type_name: nav_msgs/msg/Odometry
+  gz_type_name: ignition.msgs.Odometry
+  direction: GZ_TO_ROS
+
+- ros_topic_name: /tf
+  gz_topic_name: /ca_car/tf
+  ros_type_name: tf2_msgs/msg/TFMessage
+  gz_type_name: ignition.msgs.Pose_V
+  direction: GZ_TO_ROS
+
+- ros_topic_name: /joint_states
+  gz_topic_name: /ca_car/joint_states
+  ros_type_name: sensor_msgs/msg/JointState
+  gz_type_name: ignition.msgs.Model
+  direction: GZ_TO_ROS
+
+# comandos das juntas (publicados pelo ca_sim/vesc_to_gz)
+- ros_topic_name: /ca_car/cmd/steer_left
+  gz_topic_name: /ca_car/cmd/steer_left
+  ros_type_name: std_msgs/msg/Float64
+  gz_type_name: ignition.msgs.Double
+  direction: ROS_TO_GZ
+
+- ros_topic_name: /ca_car/cmd/steer_right
+  gz_topic_name: /ca_car/cmd/steer_right
+  ros_type_name: std_msgs/msg/Float64
+  gz_type_name: ignition.msgs.Double
+  direction: ROS_TO_GZ
+
+- ros_topic_name: /ca_car/cmd/wheel_rear_left
+  gz_topic_name: /ca_car/cmd/wheel_rear_left
+  ros_type_name: std_msgs/msg/Float64
+  gz_type_name: ignition.msgs.Double
+  direction: ROS_TO_GZ
+
+- ros_topic_name: /ca_car/cmd/wheel_rear_right
+  gz_topic_name: /ca_car/cmd/wheel_rear_right
+  ros_type_name: std_msgs/msg/Float64
+  gz_type_name: ignition.msgs.Double
+  direction: ROS_TO_GZ
