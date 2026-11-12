@@ -53,6 +53,22 @@ OBSTACLE_RADIUS = 0.5
 PATH_FILTER_MARGIN = 0.10
 OBS_APPEARS_THRESH_FOR_SLOW = 0.15
 LOCAL_SCAN_MULT = 6
+# [ca_ws] Custo de obstaculo suave: W*(R_SOFT - d)^2 quando d < R_SOFT = OBSTACLE_RADIUS + margem.
+# Antes cada plano com um estado a < OBSTACLE_RADIUS devolvia um custo fixo (1e9): patamar sem
+# gradiente, o L-BFGS-B nao conseguia afastar o plano do obstaculo e o carro parava.
+# A validacao dura (states_hit_obstacle com OBSTACLE_RADIUS) continua igual, por isso o custo
+# suave comeca antes (margem) e cresce depressa: passar a 0.5 m custa 1e5 * 0.2^2 = 4000.
+OBSTACLE_SOFT_MARGIN = 0.20
+W_OBSTACLE_SOFT = 1.0e5
+# [ca_ws] Tolerancia do L-BFGS-B (era 0.1 = parar quando uma iteracao melhora < 10%). Com 0.1 o
+# plano ficava as vezes 1 cm dentro do raio duro e o carro parava. Custo: update() ~6 -> ~18 ms
+# (max ~55 ms) num PC; medir na Jetson (o ciclo e de dt = 300 ms).
+MPC_FTOL = 1e-3
+# [ca_ws] Modo "contornar" (rejoin sequencial) desligado: comecava a referencia DEPOIS do bloco
+# inseguro com o carro ainda ~2 m antes; todos os planos cortavam a curva 1.4-2 m e eram
+# rejeitados pelo tubo (PATH_TUBE_LIMIT) -> "STOP: sem trajetoria livre apos obstaculo".
+# Com o custo suave o plano normal contorna sozinho. Ver tools/mpc_offline.py e o README.
+USE_REJOIN = False
 
 # Retângulo branco (apenas visual)
 OBSTACLE_RECT_SIZE = (0.5, 0.5, 0.1)
@@ -390,7 +406,12 @@ class MPCController(Node):
         total = 0.0; big = 1e9
         for k, (st, rp, rh, curv) in enumerate(zip(states, ref_pts, ref_heads, ref_curv)):
             x, y, yaw, vk = st; rx, ry = rp
-            if self.states_hit_obstacle([(x, y, 0.0, 0.0)], relevant_obs, appear_extra=0.0): return big
+            # [ca_ws] era: if self.states_hit_obstacle(...): return big  (patamar sem gradiente)
+            r_soft = OBSTACLE_RADIUS + OBSTACLE_SOFT_MARGIN
+            for (ox, oy) in relevant_obs:
+                d_obs = math.hypot(x - ox, y - oy)
+                if d_obs < r_soft:
+                    total += W_OBSTACLE_SOFT * (r_soft - d_obs) ** 2
             dist = math.hypot(x - rx, y - ry); total += w_cross_track * dist * dist
             if dist > TRACK_HALF_WIDTH: total += big * (dist - TRACK_HALF_WIDTH + 1.0)
             hd = abs(self.normalize_angle(yaw - rh)); total += w_heading * hd
@@ -464,7 +485,7 @@ class MPCController(Node):
         init = v0 + g0
         bounds = [(V_MIN, V_MAX)] * H + [(-GAMMA_MAX, GAMMA_MAX)] * H
         result = minimize(self.mpc_cost_function, init, method='L-BFGS-B', bounds=bounds,
-                          options={'maxiter': 32, 'ftol': 0.1})
+                          options={'maxiter': 32, 'ftol': MPC_FTOL})
         if result.success:
             v_seq = [float(np.clip(v, V_MIN, V_MAX)) for v in result.x[:H]]
             g_seq = [float(np.clip(g, -GAMMA_MAX, GAMMA_MAX)) for g in result.x[H:]]
@@ -570,7 +591,8 @@ class MPCController(Node):
         used_override = False
 
         # bloco proibido mesmo em cima → rejoin sequencial
-        unsafe_block = self.find_unsafe_block(idx_now, relevant_obs_now, max_scan=80) if relevant_obs_now else None
+        unsafe_block = (self.find_unsafe_block(idx_now, relevant_obs_now, max_scan=80)
+                        if (USE_REJOIN and relevant_obs_now) else None)
         if unsafe_block is not None:
             _, last = unsafe_block
             first_safe = self.first_safe_after(last, relevant_obs_now, max_scan=80)

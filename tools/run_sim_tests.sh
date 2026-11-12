@@ -26,17 +26,20 @@ OBS_TERMINAL_MD='obstacles:=[7.5,2.0,0.5,1.8,0.5,2.5,0.7,2.0] min_obstacle_clear
 SCENARIOS=(
   "mpc_base|PASS|sim:=kinematic controller:=mpc"
   "dwa_base|INSTAVEL|sim:=kinematic controller:=dwa"
-  "mpc_obstaculos_terminal_md|FAIL|sim:=kinematic controller:=mpc $OBS_TERMINAL_MD"
+  "mpc_obstaculos_terminal_md|PASS|sim:=kinematic controller:=mpc $OBS_TERMINAL_MD"
+  "mpc_obstaculo_na_reta|FAIL|sim:=kinematic controller:=mpc obstacles:=[2.5,0.0] min_obstacle_clearance:=0.3"
   "gz_mpc_base|PASS|sim:=gazebo controller:=mpc"
   "gz_dwa_base|INSTAVEL|sim:=gazebo controller:=dwa"
-  "gz_mpc_obstaculos_terminal_md|FAIL|sim:=gazebo controller:=mpc $OBS_TERMINAL_MD"
+  "gz_mpc_obstaculos_terminal_md|PASS|sim:=gazebo controller:=mpc $OBS_TERMINAL_MD"
 )
 # Esperado: PASS, FAIL (bug conhecido) ou INSTAVEL (qualquer resultado; nao conta para o exit code).
 #  *dwa_base (INSTAVEL): o caminho Q acaba em (1.1, 0), em cima da reta inicial. O DWA da o
 #    percurso por terminado so pela distancia ao ultimo ponto (sem olhar ao progresso), por isso
 #    as vezes para logo na reta e outras falha a janela de 0.3 m e da mais uma volta (erro ate ~3.5 m).
-#  *mpc_obstaculos_terminal_md: o MPC para ~1.8 m antes do obstaculo
-#    ("STOP: sem trajetoria livre apos obstaculo") e nunca o contorna.
+#  *mpc_obstaculos_terminal_md: so o (7.5, 2.0) interessa (0.4 m por fora da curva grande); o MPC
+#    contorna-o por dentro a ~0.7 m. Antes do custo suave parava 2 m antes (ver README).
+#  mpc_obstaculo_na_reta (FAIL): obstaculo EM CIMA do caminho -> o MPC para ~1.5 m antes
+#    ("STOP: sem trajetoria livre (curto e longo)"). Limitacao conhecida, ver README.
 
 only="${1:-}"; bad=0
 have_gz=1; command -v ign >/dev/null || have_gz=0
