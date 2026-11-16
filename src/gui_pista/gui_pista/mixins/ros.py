@@ -9,6 +9,7 @@ try:
     import rclpy
     from geometry_msgs.msg import Point, Pose, PoseStamped
     from nav_msgs.msg import MapMetaData, OccupancyGrid, Path
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy  # [ca_ws]
     from visualization_msgs.msg import Marker, MarkerArray
 
     HAVE_ROS2 = True
@@ -23,6 +24,17 @@ class ROSMixin:
         cy = math.cos(yaw * 0.5)
         sy = math.sin(yaw * 0.5)
         return (0.0, 0.0, sy, cy)
+
+    def _px_yaw_to_world(self, theta):  # [ca_ws]
+        """[ca_ws] O theta do planeador/desenho esta no referencial dos pixeis (y para baixo).
+
+        Roda a direcao com os mesmos eixos de _px_to_world. Antes ia direto para o quaternion, por
+        isso com Y+ = Cima o yaw publicado tinha o sinal trocado (rumo 45 graus -> yaw -45 graus).
+        """
+        c, s = math.cos(theta), math.sin(theta)  # [ca_ws]
+        vx, vy = self.axis_x_vec  # [ca_ws]
+        ux, uy = self.axis_y_vec  # [ca_ws]
+        return math.atan2(ux * c + uy * s, vx * c + vy * s)  # [ca_ws]
 
     def _px_to_world(self, x_px, y_px):
         vx, vy = self.axis_x_vec
@@ -55,7 +67,11 @@ class ROSMixin:
             try:
                 rclpy.init(args=None)
                 self.ros_node = rclpy.create_node("traj_gui_publisher")
-                self.ros_pub = self.ros_node.create_publisher(Path, self.ref_path_topic, 10)
+                # [ca_ws] latched (transient_local, compativel com os subscritores volatile do
+                # MPC/DWA/gz_spawner) + republicado a 1 Hz em publish_reference_path.
+                latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,  # [ca_ws]
+                                     reliability=ReliabilityPolicy.RELIABLE)  # [ca_ws]
+                self.ros_pub = self.ros_node.create_publisher(Path, self.ref_path_topic, latched)  # [ca_ws]
                 self.ros_map_pub = self.ros_node.create_publisher(OccupancyGrid, self.map_topic, 10)
                 self.ros_limit_pub = self.ros_node.create_publisher(MarkerArray, self.limit_topic, 10)
                 self.ros_inited = True
@@ -72,9 +88,16 @@ class ROSMixin:
                 return False
         return True
 
-    def _build_nav_path(self, path_pts):
+    def _build_nav_path(self, path_pts, spacing_m=None):  # [ca_ws] spacing_m opcional
         if not path_pts or len(path_pts) < 2:
             return None
+        if spacing_m:  # [ca_ws] reamostrar com espacamento uniforme em metros
+            # [ca_ws] o desenho vem a ~1 px (6.5 mm no mapa FNR) e o planeador a 30-470 mm; o
+            # dwa_global_follower usa janelas de N pontos (window_pts=50), por isso o espacamento
+            # tem de ser parecido com o do q_path_publisher (~0.1 m).
+            pts = self._resample_polyline([(p[0], p[1]) for p in path_pts], self.m2px(spacing_m))  # [ca_ws]
+            if len(pts) >= 2:  # [ca_ws]
+                path_pts = self._points_to_path(pts, self.max_speed)  # [ca_ws]
         msg = Path()
         frame = self.frame_id_var.get().strip() or "map"
         msg.header.frame_id = frame
@@ -83,7 +106,7 @@ class ROSMixin:
         poses = []
         for (x, y, theta, _) in path_pts:
             px, py = self._px_to_world(x, y)
-            qx, qy, qz, qw = self._yaw_to_quat(theta)
+            qx, qy, qz, qw = self._yaw_to_quat(self._px_yaw_to_world(theta))  # [ca_ws]
             pose = PoseStamped()
             pose.header.frame_id = frame
             if self.ros_node is not None:
@@ -331,7 +354,7 @@ class ROSMixin:
         if not self._ensure_ros2():
             return
         try:
-            msg = self._build_nav_path(path_pts)
+            msg = self._build_nav_path(path_pts, spacing_m=getattr(self, "publish_spacing_m", 0.10))  # [ca_ws]
             if msg is None:
                 messagebox.showwarning("Publicar Path", "Caminho inválido/curto.")
                 return
@@ -341,12 +364,33 @@ class ROSMixin:
                 f"Debug origem: primeiro ponto GUI ({x0:.1f},{y0:.1f}) → mundo ({wx0:.3f},{wy0:.3f}) m"
             )
             self.ros_pub.publish(msg)
+            self._last_path_msg = msg  # [ca_ws]
+            if getattr(self, "_republish_id", None) is None:  # [ca_ws]
+                self._republish_id = self.after(1000, self._republish_path)  # [ca_ws]
             self.log_msg(
                 f"ROS2: publicado {len(msg.poses)} poses em '{self.ref_path_topic}' (frame_id='{msg.header.frame_id}')."
             )
             self.update_status(f"Publicado em {self.ref_path_topic}")
         except Exception as exc:
             messagebox.showerror("Publicar Path", f"Erro ao publicar: {exc}")
+
+    def _republish_path(self):  # [ca_ws]
+        """[ca_ws] Republica o ultimo Path a 1 Hz (o q_path_publisher publica a 10 Hz).
+
+        O GUI so publicava ao carregar no botao: o 1.o publish logo a seguir a criar o publisher
+        pode perder-se (descoberta DDS ainda a decorrer) e os controladores que o `drive` arranca
+        depois (subscritores volatile) nunca recebiam o caminho. O MPC ignora caminhos iguais
+        (hash) e o gz_spawner so usa o primeiro, por isso republicar e inofensivo.
+        """
+        self._republish_id = None  # [ca_ws]
+        msg = getattr(self, "_last_path_msg", None)  # [ca_ws]
+        if msg is None or self.ros_pub is None:  # [ca_ws]
+            return  # [ca_ws]
+        try:  # [ca_ws]
+            self.ros_pub.publish(msg)  # [ca_ws]
+        except Exception:  # [ca_ws]
+            return  # [ca_ws] contexto ROS ja fechado
+        self._republish_id = self.after(1000, self._republish_path)  # [ca_ws]
 
     def publish_occupancy_grid(self):
         if self.image_array is None:

@@ -7,6 +7,11 @@ class ScaleMixin:
     """Provides unit conversion helpers and scale update logic."""
 
     def ppm(self):
+        # [ca_ws] escala fixa vinda de um map.yaml (load_map_yaml): 1/resolution px/m. Sem isto a
+        # escala era grid_spacing * N, i.e. a imagem media sempre 24/5 = 4.8 m de altura (a pista
+        # FNR tem 7.0 m) e mexer no slider da grelha mudava a escala do mundo.
+        if getattr(self, "fixed_ppm", None):  # [ca_ws]
+            return float(self.fixed_ppm)  # [ca_ws]
         if not self.grid_spacing:
             return 1.0
         if self.scale_mode.get() == "sqm":
@@ -60,6 +65,8 @@ class ScaleMixin:
             )
         else:
             msg = f"1 quad = {self.meters_per_square:.3f} m  |  {ppm:.1f} px/m"
+        if getattr(self, "fixed_ppm", None):  # [ca_ws]
+            msg = f"map.yaml: {ppm:.1f} px/m ({1.0 / ppm:.5f} m/px)  |  1 quad = {self.px2m(px_per_sq):.3f} m"  # [ca_ws]
 
         try:
             self.lbl_scale_info.config(text=msg)

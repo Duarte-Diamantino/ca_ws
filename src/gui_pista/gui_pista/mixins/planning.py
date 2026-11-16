@@ -289,8 +289,7 @@ class PlanningMixin:
             return
 
         if state["dwa_steps"] > 1600:
-            self.log_msg("DWA: bloqueado por passos excessivos.")
-            self._retry_segment()
+            self._dwa_failed("DWA: bloqueado por passos excessivos.")  # [ca_ws]
             return
 
         prev_dist = math.hypot(state["dwa_path"][-1][0] - tx, state["dwa_path"][-1][1] - ty)
@@ -336,8 +335,7 @@ class PlanningMixin:
                 if best is None or cost < best[0]:
                     best = (cost, vv, steer)
         if best is None:
-            self.log_msg("DWA: sem movimento viável → retry.")
-            self._retry_segment()
+            self._dwa_failed("DWA: sem movimento viável → retry.")  # [ca_ws]
             return
 
         _, v_new, steer = best
@@ -367,8 +365,7 @@ class PlanningMixin:
         else:
             state["dwa_stuck"] = 0
         if state["dwa_stuck"] > 120:
-            self.log_msg("DWA: sem progresso → retry com outra entrada.")
-            self._retry_segment()
+            self._dwa_failed("DWA: sem progresso → retry com outra entrada.")  # [ca_ws]
             return
 
         overlays = []
@@ -380,6 +377,23 @@ class PlanningMixin:
             f"Seg {state['seg_index']+1} tent {state['attempt']+1}: DWA — passo {state['dwa_steps']}"
         )
         self.anim_timer = self.after(16, self._tick_dwa)
+
+    def _dwa_failed(self, reason):  # [ca_ws]
+        """[ca_ws] O DWA falhou. Se o Hybrid A* ja chegou ao objetivo, segue com ele (semente do MPC).
+
+        O DWA vai direto ao ponto de entrada (nao segue o caminho do Hybrid A*), por isso fica
+        preso atras de uma parede que o Hybrid A* ja contornou. Antes ia sempre para
+        _retry_segment: 3 tentativas iguais, segmento saltado e caminho final vazio
+        (test_planner.test_contorna_parede).
+        """
+        state = self.run_state  # [ca_ws]
+        hybrid = state.get("path_hybrid")  # [ca_ws]
+        if hybrid and len(hybrid) >= 2 and self.goal_hit(hybrid[-1][0], hybrid[-1][1], state["cur_goal"]):  # [ca_ws]
+            self.log_msg(reason.split(" →")[0] + " → a usar o caminho do Hybrid A*.")  # [ca_ws]
+            self._start_mpc_seed()  # [ca_ws] path_dwa e None -> semente = Hybrid A*
+            return  # [ca_ws]
+        self.log_msg(reason)  # [ca_ws]
+        self._retry_segment()  # [ca_ws]
 
     def _retry_segment(self):
         state = self.run_state

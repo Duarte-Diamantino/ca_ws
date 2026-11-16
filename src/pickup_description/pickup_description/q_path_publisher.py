@@ -30,6 +30,10 @@ class QPathPublisher(Node):
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('trans_x', -0.4)  # deslocamento global em X (metros)
         self.declare_parameter('trans_y', 0.0)  # deslocamento global em Y (metros)
+        # [ca_ws] escala global (depois da translacao). O map.yaml passou para a escala real da
+        # pista FNR (lado menor 7 m em vez de 6.49 m), por isso o caminho cresce o mesmo fator.
+        # scale:=1.0 da o caminho original.
+        self.declare_parameter('scale', 7.0 / (536 * 0.0121))
 
         self.marker_pub = self.create_publisher(Marker, 'visualization_marker', 10)
         self.path_pub   = self.create_publisher(Path, 'reference_path', 10)
@@ -40,6 +44,7 @@ class QPathPublisher(Node):
         # lê a translação global (podes mudar em runtime com `ros2 param set`)
         tx = float(self.get_parameter('trans_x').value)
         ty = float(self.get_parameter('trans_y').value)
+        s = float(self.get_parameter('scale').value)
 
         now = self.get_clock().now().to_msg()
 
@@ -122,7 +127,7 @@ class QPathPublisher(Node):
 
         # 4) Aplicar translação global apenas na publicação (todos os pontos)
         for x, y in points:
-            p = Point(x=x + tx, y=y + ty, z=0.0)
+            p = Point(x=(x + tx) * s, y=(y + ty) * s, z=0.0)
             m.points.append(p)
 
             ps = PoseStamped()

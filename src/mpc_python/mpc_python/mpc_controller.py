@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import (FloatingPointRange, IntegerRange, ParameterDescriptor,  # [ca_ws]
+                                SetParametersResult)
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Float64
 from geometry_msgs.msg import Point, PoseArray
 from visualization_msgs.msg import Marker, MarkerArray
 from sensor_msgs.msg import Joy
 import numpy as np
-import math, time, hashlib
+import math, time, hashlib, sys
 from scipy.optimize import minimize
 from scipy.spatial import KDTree
 
@@ -64,11 +66,42 @@ W_OBSTACLE_SOFT = 1.0e5
 # plano ficava as vezes 1 cm dentro do raio duro e o carro parava. Custo: update() ~6 -> ~18 ms
 # (max ~55 ms) num PC; medir na Jetson (o ciclo e de dt = 300 ms).
 MPC_FTOL = 1e-3
+MPC_MAXITER = 32          # [ca_ws] iteracoes maximas do L-BFGS-B (era fixo no codigo)
 # [ca_ws] Modo "contornar" (rejoin sequencial) desligado: comecava a referencia DEPOIS do bloco
 # inseguro com o carro ainda ~2 m antes; todos os planos cortavam a curva 1.4-2 m e eram
 # rejeitados pelo tubo (PATH_TUBE_LIMIT) -> "STOP: sem trajetoria livre apos obstaculo".
 # Com o custo suave o plano normal contorna sozinho. Ver tools/mpc_offline.py e o README.
 USE_REJOIN = False
+# [ca_ws] Obstaculo EM CIMA do caminho: a referencia e desviada para o lado (desvio lateral suave,
+# perpendicular ao caminho) ate ficar a raio duro + AVOID_MARGIN do obstaculo, e o resto do MPC (custo, tubo
+# PATH_TUBE_LIMIT, progresso) usa esse caminho desviado. Antes os pontos perto do obstaculo eram
+# apagados (filter_ref_points_near_obstacles) e todos os planos que desviavam mais de 0.55 m do
+# caminho original eram rejeitados pelo tubo -> o carro parava ~1.4 m antes do obstaculo.
+# O MPC nao conhece a pista: o desvio pode sair da faixa se o obstaculo estiver junto a berma.
+USE_REF_SHIFT = True
+AVOID_MARGIN = 0.10       # o caminho desviado passa a (raio duro do obstaculo + isto) do obstaculo
+AVOID_RAMP = 2.0          # m de caminho para entrar/sair do desvio (raio minimo do carro ~0.8 m)
+AVOID_DEFAULT_SIDE = 1.0  # obstaculo mesmo em cima do caminho: +1 contorna pela esquerda, -1 pela direita
+AVOID_CENTER_TOL = 0.05   # |desvio lateral do obstaculo| abaixo disto = "em cima do caminho"
+# Obstaculos a menos de OBSTACLE_RADIUS + margem + isto da referencia entram no custo e na validacao
+# (com o caminho desviado a referencia ja nao passa a < OBSTACLE_RADIUS do obstaculo).
+OBSTACLE_LOOKAROUND = 0.50
+# [ca_ws] Raio de cada obstaculo. Com OBSTACLE_SIZE_FROM_Z, o /obstacles traz o tamanho de cada um em
+# pose.position.z (raio do obstaculo, > 0) e o raio duro (distancia minima ao centro do carro) e
+# esse + CAR_HALF_WIDTH + OBSTACLE_MARGIN: o obstaculo e o que e, mais o carro, mais a folga.
+# Obstaculos sem tamanho (z = 0, ou OBSTACLE_SIZE_FROM_Z desligado) usam o OBSTACLE_RADIUS fixo.
+# Desligado por defeito (no carro real nao se sabe o que a percecao poe em z); o simulador
+# (config/mpc.yaml, GUI ca_gui) liga-o.
+OBSTACLE_SIZE_FROM_Z = False
+CAR_HALF_WIDTH = 0.10      # meia largura do carro (0.193 m de largura) [m]
+OBSTACLE_MARGIN = 0.10     # folga entre a parte lateral do carro e o obstaculo [m]
+# [ca_ws] Referencia local espacada pela velocidade: o ponto k fica a (k+1)*v*dt do carro ao longo
+# do caminho, com v = ultima velocidade comandada (>= REF_SPACING_V_MIN). Antes eram sempre 3 pontos
+# por passo (0.45 m / 0.3 s = 1.5 m/s > V_MAX): a referencia fugia a frente do carro, o custo
+# (distancia ao ponto k, penalizacao de TRACK_HALF_WIDTH) puxava o plano para dentro das curvas.
+REF_SPEED_SPACING = True    # False = como antes (3 pontos por passo)
+REF_SPACING_V_MIN = 0.5
+REF_SPACING_LEAD = 0.15     # m/s a mais que a ultima velocidade (deixa o MPC acelerar)
 
 # Retângulo branco (apenas visual)
 OBSTACLE_RECT_SIZE = (0.5, 0.5, 0.1)
@@ -105,15 +138,67 @@ FILTER_MARGIN_AFTER_FACTOR = 0.5
 REJOIN_CANDIDATES = 25
 REJOIN_STEP = 2
 
+# ===== [ca_ws] Parametros ajustaveis =====
+# Cada constante desta lista e tambem um parametro ROS com o mesmo nome. Com o MPC a correr:
+#   ros2 param set /mpc_controller V_MAX 1.5            (usar 1.5 / 2.0: o tipo tem de bater)
+#   ros2 run rqt_reconfigure rqt_reconfigure             (barras deslizantes)
+#   terminal do MPC (tools/sim.sh mpc): p = ver, t = mudar, g = guardar
+# Ao arrancar: --ros-args --params-file mpc_python/config/mpc.yaml (+ ~/ca_ws/mpc_params.yaml).
+# As alteracoes valem no ciclo seguinte; os marcados com "ref" voltam a calcular o caminho desviado
+# dos obstaculos (sem perder o progresso). dt nao e ajustavel (periodo do timer).
+# (nome, descricao, minimo, maximo, recalcula_referencia)
+TUNABLE = [
+    ('V_MAX', 'velocidade maxima [m/s]', 0.2, 4.0, False),
+    ('V_MIN', 'velocidade minima dos planos [m/s]', 0.0, 1.0, False),
+    ('V_MAX_NOT_ALIGNED', 'velocidade maxima com rumo/erro acima dos limiares [m/s]', 0.1, 4.0, False),
+    ('ALIGN_HEADING_THRESH_DEG', 'erro de rumo acima do qual limita a V_MAX_NOT_ALIGNED [graus]', 1.0, 45.0, False),
+    ('ALIGN_CTE_THRESH', 'erro lateral acima do qual limita a V_MAX_NOT_ALIGNED [m]', 0.01, 1.0, False),
+    ('ACCEL_LIMIT', 'aceleracao maxima do comando [m/s^2]', 0.05, 5.0, False),
+    ('DECEL_LIMIT', 'travagem maxima do comando [m/s^2]', 0.1, 10.0, False),
+    ('MAX_LAT_ACC', 'aceleracao lateral maxima nas curvas (velocidade de referencia) [m/s^2]', 0.1, 10.0, False),
+    ('OMEGA_MAX', 'velocidade angular maxima [rad/s]', 0.1, 5.0, False),
+    ('w_cross_track', 'peso: distancia ao caminho', 0.0, 1000.0, False),
+    ('w_heading', 'peso: erro de rumo', 0.0, 1000.0, False),
+    ('w_control_effort', 'peso: tamanho dos comandos', 0.0, 100.0, False),
+    ('w_control_smooth', 'peso: variacao dos comandos', 0.0, 100.0, False),
+    ('w_terminal', 'peso: distancia ao caminho no fim do horizonte', 0.0, 1000.0, False),
+    ('H_SHORT', 'horizonte normal [passos de dt = 0.3 s]', 2, 30, False),
+    ('H_LONG', 'horizonte longo (quando o curto colide) [passos]', 4, 40, False),
+    ('MPC_FTOL', 'tolerancia do L-BFGS-B', 1e-6, 0.5, False),
+    ('MPC_MAXITER', 'iteracoes maximas do L-BFGS-B', 4, 200, False),
+    ('TRACK_HALF_WIDTH', 'distancia ao ponto de referencia acima da qual penaliza 1e9 [m]', 0.1, 3.0, False),
+    ('PATH_TUBE_LIMIT', 'desvio maximo ao caminho aceite num plano [m]', 0.1, 3.0, False),
+    ('OBSTACLE_SIZE_FROM_Z', 'usar o tamanho de cada obstaculo (pose.position.z = raio) de /obstacles', None, None, True),
+    ('CAR_HALF_WIDTH', 'meia largura do carro: raio duro = raio do obstaculo + isto + OBSTACLE_MARGIN [m]', 0.0, 0.5, True),
+    ('OBSTACLE_MARGIN', 'folga entre o carro e o obstaculo [m]', 0.0, 1.0, True),
+    ('OBSTACLE_RADIUS', 'raio duro dos obstaculos SEM tamanho (distancia ao centro do carro) [m]', 0.05, 2.0, True),
+    ('OBSTACLE_SOFT_MARGIN', 'margem do custo suave alem do raio [m]', 0.0, 1.0, False),
+    ('W_OBSTACLE_SOFT', 'peso do custo suave dos obstaculos', 0.0, 1e7, False),
+    ('OBS_APPEARS_THRESH_FOR_SLOW', 'abranda (0.35 m/s) se o plano passa a raio + isto [m]', 0.0, 1.0, False),
+    ('USE_REF_SHIFT', 'desviar a referencia a volta dos obstaculos', None, None, True),
+    ('AVOID_MARGIN', 'o caminho desviado passa a raio duro + isto do obstaculo [m]', 0.0, 1.0, True),
+    ('AVOID_RAMP', 'comprimento das rampas do desvio [m]', 0.2, 6.0, True),
+    ('AVOID_DEFAULT_SIDE', 'obstaculo em cima do caminho: +1 esquerda, -1 direita', -1.0, 1.0, True),
+    ('REF_SPEED_SPACING', 'referencia espacada pela velocidade (False = 3 pontos por passo)', None, None, False),
+    ('REF_SPACING_LEAD', 'm/s a mais que a ultima velocidade no espacamento da referencia', 0.0, 1.0, False),
+    ('END_SLOWDOWN_REMAIN', 'comeca a abrandar a esta distancia do fim [m]', 0.0, 10.0, False),
+    ('END_STOP_REMAIN', 'para a esta distancia do fim [m]', 0.0, 5.0, False),
+    ('REQUIRE_OBSTACLES_TO_START', 'so arranca depois de receber /obstacles', None, None, False),
+]
+
 class MPCController(Node):
     def __init__(self):
         super().__init__('mpc_controller')
+        self.declare_tunables()  # [ca_ws] constantes ajustaveis como parametros ROS
 
         # Estado
         self.x = 0.0; self.y = 0.0; self.yaw = 0.0; self.velocity = 0.0
         self.have_odom = False
 
         # Trajetória
+        # [ca_ws] nominal_path = caminho recebido (reamostrado); ref_path = o mesmo desviado dos
+        # obstaculos (USE_REF_SHIFT), e o que o MPC segue
+        self.nominal_path = []; self._obs_key = None
         self.base_path = []; self.ref_path = []
         self.path_headings = []; self.path_curvatures = []; self.path_cumdist = []
         self.path_kdtree = None; self.current_segment = 0
@@ -126,6 +211,7 @@ class MPCController(Node):
 
         # Obstáculos
         self.obstacles = []; self.have_obstacles = False
+        self.obstacle_sizes = {}  # [ca_ws] (x, y) -> raio do obstaculo (pose.position.z), se vier
         self.active_obstacles = []
 
         # Joystick
@@ -157,6 +243,44 @@ class MPCController(Node):
 
         self.create_timer(dt, self.update)
 
+    # ---------- [ca_ws] Parametros ajustaveis ----------
+    def declare_tunables(self):
+        mod = sys.modules[__name__]
+        for name, desc, lo, hi, _ in TUNABLE:
+            val = getattr(mod, name)
+            d = ParameterDescriptor(description=desc)
+            if isinstance(val, bool):
+                pass
+            elif isinstance(val, int):
+                d.integer_range = [IntegerRange(from_value=int(lo), to_value=int(hi), step=1)]
+            else:
+                val = float(val)
+                d.floating_point_range = [FloatingPointRange(from_value=float(lo), to_value=float(hi), step=0.0)]
+            # o valor declarado vem do --params-file se existir, senao fica o do codigo
+            setattr(mod, name, self.declare_parameter(name, val, d).value)
+        self.add_on_set_parameters_callback(self.on_set_tunables)
+
+    def on_set_tunables(self, params):
+        mod = sys.modules[__name__]
+        spec = {t[0]: t for t in TUNABLE}
+        new = {p.name: p.value for p in params if p.name in spec}
+        if not new:
+            return SetParametersResult(successful=True)
+        cur = lambda n: new.get(n, getattr(mod, n))  # noqa: E731
+        if cur('V_MIN') >= cur('V_MAX'):
+            return SetParametersResult(successful=False, reason='V_MIN tem de ser < V_MAX')
+        if cur('H_LONG') < cur('H_SHORT'):
+            return SetParametersResult(successful=False, reason='H_LONG tem de ser >= H_SHORT')
+        refresh = False
+        for name, value in new.items():
+            old = getattr(mod, name)
+            setattr(mod, name, value)
+            refresh |= spec[name][4] and old != value
+            self.get_logger().info(f'parametro {name}: {old} -> {value}')
+        if refresh and self.nominal_path:
+            self.update_reference_geometry()
+        return SetParametersResult(successful=True)
+
     # ---------- Callbacks ----------
     def odom_cb(self, msg: Odometry):
         self.x = msg.pose.pose.position.x
@@ -172,6 +296,8 @@ class MPCController(Node):
     def obstacles_cb(self, msg: PoseArray):
         first = not self.have_obstacles
         self.obstacles = [(p.position.x, p.position.y) for p in msg.poses]
+        self.obstacle_sizes = {(p.position.x, p.position.y): p.position.z for p in msg.poses
+                               if p.position.z > 0.0}  # [ca_ws] tamanho (ver OBSTACLE_SIZE_FROM_Z)
         self.have_obstacles = True
         # [ca_ws] Antes reconstruia a cada mensagem (10 Hz). rebuild_path_structures() nao usa os
         # obstaculos, mas repoe max_index_reached/post_obs_bias_count a 0 e relocaliza o carro no
@@ -180,6 +306,17 @@ class MPCController(Node):
         # Agora so relocaliza na primeira mensagem (arranque: o MPC espera pelos obstaculos).
         if first and self.base_path:
             self.rebuild_path_structures(self.base_path)
+        elif USE_REF_SHIFT and self.base_path and self._obstacles_key() != self._obs_key:
+            # [ca_ws] obstaculos mudaram: volta a desviar a referencia (sem mexer no progresso)
+            self.update_reference_geometry()
+
+    def _obstacles_key(self):
+        return tuple(round(v, 2) for p in self.obstacles for v in (*p, self.obstacle_sizes.get(p, 0.0)))
+
+    def obs_radius(self, o):
+        """[ca_ws] Raio duro do obstaculo o = (x, y): distancia minima ao centro do carro."""
+        r = self.obstacle_sizes.get(o, 0.0) if OBSTACLE_SIZE_FROM_Z else 0.0
+        return r + CAR_HALF_WIDTH + OBSTACLE_MARGIN if r > 0.0 else OBSTACLE_RADIUS
 
     def _hash_points(self, pts):
         if not pts: return None
@@ -198,7 +335,8 @@ class MPCController(Node):
         self.get_logger().info(f"Trajetória recebida com {len(self.ref_path)} pontos (base {len(self.base_path)})")
 
     # ---------- Trajetória ----------
-    def resample_path(self, points, step=RESAMPLE_STEP):
+    def resample_path(self, points, step=None):
+        step = RESAMPLE_STEP if step is None else step  # [ca_ws] valor atual (parametro)
         if len(points) < 2: return points
         points_arr = np.array(points)
         seg = np.diff(points_arr, axis=0)
@@ -219,13 +357,36 @@ class MPCController(Node):
         return out
 
     def rebuild_path_structures(self, pts):
-        self.ref_path = list(pts)
+        self.nominal_path = list(pts)
         self.closed_loop = False
-        if len(self.ref_path) >= 3:
-            d_cl = math.hypot(self.ref_path[0][0]-self.ref_path[-1][0],
-                              self.ref_path[0][1]-self.ref_path[-1][1])
+        if len(self.nominal_path) >= 3:
+            d_cl = math.hypot(self.nominal_path[0][0]-self.nominal_path[-1][0],
+                              self.nominal_path[0][1]-self.nominal_path[-1][1])
             if d_cl <= LOOP_CLOSE_TOL:
                 self.closed_loop = True
+
+        self.update_reference_geometry()
+
+        # KD
+        if self.have_odom and self.path_kdtree:
+            _, idx = self.path_kdtree.query([self.x, self.y])
+            self.current_segment = int(idx)
+        else:
+            self.current_segment = 0
+
+        # reset progresso / rejoin
+        self.max_index_reached = 0
+        self.progress_ratio = 0.0
+        self.post_obs_bias_count = 0
+
+    def update_reference_geometry(self):
+        """[ca_ws] ref_path = nominal_path (desviado dos obstaculos) + rumos, curvaturas, distancia
+        acumulada e KD-tree. Nao mexe no progresso (os indices sao os mesmos do caminho nominal)."""
+        pts = self.nominal_path
+        self._obs_key = self._obstacles_key()
+        if USE_REF_SHIFT and self.obstacles and len(pts) >= 3:
+            pts = self.shift_path_around_obstacles(pts, self.obstacles)
+        self.ref_path = list(pts)
 
         # headings
         self.path_headings = []
@@ -253,24 +414,72 @@ class MPCController(Node):
 
         # KD
         self.path_kdtree = KDTree(self.ref_path) if self.ref_path else None
-        if self.have_odom and self.path_kdtree:
-            _, idx = self.path_kdtree.query([self.x, self.y])
-            self.current_segment = int(idx)
-        else:
-            self.current_segment = 0
 
-        # reset progresso / rejoin
-        self.max_index_reached = 0
-        self.progress_ratio = 0.0
-        self.post_obs_bias_count = 0
+    def shift_path_around_obstacles(self, pts, obstacles):
+        """[ca_ws] Desvia o caminho para o lado em cada passagem perto de um obstaculo.
+
+        Em cada passagem (o caminho pode passar 2x perto do mesmo obstaculo, ex. o Q), no ponto mais
+        proximo mede-se o desvio lateral do obstaculo (lat > 0: a esquerda). O caminho e empurrado
+        para o lado contrario ate ficar a C = raio duro + AVOID_MARGIN do obstaculo: deslocamento total
+        enquanto o caminho original estaria a < C, e rampa em cosseno de AVOID_RAMP m antes e
+        depois. Com varios obstaculos fica, em cada ponto, o maior deslocamento.
+        """
+        P = np.asarray(pts, dtype=float)
+        n = len(P)
+        seg_len = np.hypot(*np.diff(P, axis=0).T)
+        s = np.concatenate(([0.0], np.cumsum(seg_len)))
+        T = np.gradient(P, axis=0)
+        T /= np.maximum(np.hypot(T[:, 0], T[:, 1]), 1e-9)[:, None]
+        left = np.stack([-T[:, 1], T[:, 0]], axis=1)
+        offset = np.zeros(n)
+        for ox, oy in obstacles:
+            C = self.obs_radius((ox, oy)) + AVOID_MARGIN
+            d = np.hypot(P[:, 0] - ox, P[:, 1] - oy)
+            near = np.flatnonzero(d < C)
+            if near.size == 0:
+                continue
+            for group in np.split(near, np.flatnonzero(np.diff(near) > 1) + 1):
+                ic = int(group[np.argmin(d[group])])
+                lat = float((ox - P[ic, 0]) * left[ic, 0] + (oy - P[ic, 1]) * left[ic, 1])
+                if abs(lat) > AVOID_CENTER_TOL:
+                    side = -math.copysign(1.0, lat)
+                else:
+                    side = self._free_side(P, s, ic, left[ic], C, (ox, oy), obstacles)
+                amount = lat + side * C          # o ponto fica a C do obstaculo, do lado "side"
+                hold = math.sqrt(max(C * C - lat * lat, 0.0))
+                ds = np.abs(s - s[ic])
+                ramp = 0.5 * (1.0 + np.cos(math.pi * np.clip((ds - hold) / AVOID_RAMP, 0.0, 1.0)))
+                c = amount * np.where(ds <= hold, 1.0, ramp)
+                offset = np.where(np.abs(c) > np.abs(offset), c, offset)
+        Q = P + offset[:, None] * left
+        return [(float(x), float(y)) for x, y in Q]
+
+    @staticmethod
+    def _free_side(P, s, ic, left_ic, C, obstacle, obstacles):
+        """[ca_ws] Obstaculo mesmo em cima do caminho: escolhe o lado com mais espaco, isto e, o
+        mais longe de outras partes do caminho (ex. o fim do Q que volta a reta inicial) e dos
+        outros obstaculos. Empate -> AVOID_DEFAULT_SIDE."""
+        far = np.abs(s - s[ic]) > 2.0 * (C + AVOID_RAMP)
+        others = [o for o in obstacles if o != obstacle]
+        room = {}
+        for side in (1.0, -1.0):
+            cx, cy = P[ic, 0] + side * C * left_ic[0], P[ic, 1] + side * C * left_ic[1]
+            r = float(np.min(np.hypot(P[far, 0] - cx, P[far, 1] - cy))) if far.any() else math.inf
+            for ox, oy in others:
+                r = min(r, math.hypot(ox - cx, oy - cy))
+            room[side] = r
+        if abs(room[1.0] - room[-1.0]) < 0.05 or min(room.values()) > 2.0:
+            return AVOID_DEFAULT_SIDE
+        return 1.0 if room[1.0] > room[-1.0] else -1.0
 
     # ---------- Obstáculo utils ----------
-    def obstacles_relevant_for_points(self, pts, extra=PATH_FILTER_MARGIN):
+    def obstacles_relevant_for_points(self, pts, extra=None):
+        extra = PATH_FILTER_MARGIN if extra is None else extra  # [ca_ws] valor atual (parametro)
         if not pts or not self.obstacles: return []
-        r = OBSTACLE_RADIUS + max(0.0, extra)
-        r2 = r * r
         relevant = []
         for (ox, oy) in self.obstacles:
+            r = self.obs_radius((ox, oy)) + max(0.0, extra)  # [ca_ws] raio de cada obstaculo
+            r2 = r * r
             min_d2 = min((ox - x)**2 + (oy - y)**2 for (x, y) in pts)
             if min_d2 <= r2:
                 relevant.append((ox, oy))
@@ -278,21 +487,21 @@ class MPCController(Node):
 
     def states_hit_obstacle(self, states, obstacles, appear_extra=0.0):
         if not obstacles: return False
-        rad = OBSTACLE_RADIUS + max(0.0, appear_extra)
-        r2 = rad * rad
+        r2s = [(ox, oy, (self.obs_radius((ox, oy)) + max(0.0, appear_extra)) ** 2) for (ox, oy) in obstacles]  # [ca_ws]
         for (x, y, _, _) in states:
-            for (ox, oy) in obstacles:
+            for (ox, oy, r2) in r2s:
                 dx = x - ox; dy = y - oy
                 if (dx*dx + dy*dy) < r2:
                     return True
         return False
 
-    def is_ref_idx_unsafe(self, i, obstacles, extra=PATH_FILTER_MARGIN):
+    def is_ref_idx_unsafe(self, i, obstacles, extra=None):
+        extra = PATH_FILTER_MARGIN if extra is None else extra  # [ca_ws] valor atual (parametro)
         if not obstacles: return False
         rx, ry = self.ref_path[i]
-        r2 = (OBSTACLE_RADIUS + extra) ** 2
         # >>> FIX: usar a lista 'obstacles' passada como argumento <<<
         for (ox, oy) in obstacles:
+            r2 = (self.obs_radius((ox, oy)) + extra) ** 2  # [ca_ws] raio de cada obstaculo
             dx = rx - ox; dy = ry - oy
             if (dx*dx + dy*dy) <= r2:
                 return True
@@ -304,9 +513,10 @@ class MPCController(Node):
         d, idx = self.path_kdtree.query([x, y])
         return float(d)
 
-    def states_outside_tube(self, states, tube=PATH_TUBE_LIMIT):
+    def states_outside_tube(self, states, tube=None):
         """True se algum estado se afasta demasiado do caminho (corta a pista)."""
-        t2 = tube
+        # [ca_ws] era tube=PATH_TUBE_LIMIT: o valor ficava fixo quando o modulo era carregado
+        t2 = PATH_TUBE_LIMIT if tube is None else tube
         for (x, y, _, _) in states:
             if self.nearest_path_dist(x, y) > t2:
                 return True
@@ -380,19 +590,29 @@ class MPCController(Node):
             states.append((x, y, yaw, v))
         return states
 
+    def obstacle_extra(self, margin):
+        """[ca_ws] margem para escolher os obstaculos que entram no custo/validacao (ver OBSTACLE_LOOKAROUND)."""
+        return margin + (OBSTACLE_LOOKAROUND if USE_REF_SHIFT else 0.0)
+
     def mpc_cost_function(self, u):
-        H = self.H
-        control_v = u[:H]; control_g = u[H:]
-        if any((v < V_MIN) or (v > V_MAX) for v in control_v): return 1e8
-        if any(abs(g) > GAMMA_MAX for g in control_g): return 1e8
-        states = self.simulate_vehicle_dynamics(self.x, self.y, self.yaw, control_v, control_g, H=H)
+        # [ca_ws] mantido por compatibilidade; o run_optimization usa build_cost (referencia 1x)
+        return self.build_cost(self.H)(u)
+
+    def build_cost(self, H):
+        """[ca_ws] Devolve a funcao de custo do MPC para o estado atual.
+
+        O custo e exatamente o de antes (mesmos termos e pesos), mas a referencia local (ponto de
+        partida, pontos, rumos, curvaturas, obstaculos relevantes) e calculada UMA vez por
+        otimizacao em vez de em cada avaliacao (o L-BFGS-B com diferencas finitas avalia o custo
+        2H+1 vezes por iteracao), e o rollout e os termos sao feitos em Python simples (para H = 6/16 o numpy e mais lento).
+        """
         if self.ref_start_override is not None:
             start_idx = int(self.ref_start_override)
         else:
             _, start_idx, _ = self.find_closest_point_ordered(self.x, self.y)
         base_pts, base_heads, base_curv = self.get_local_reference_base(start_idx, H=H)
         margin = PATH_FILTER_MARGIN * (FILTER_MARGIN_AFTER_FACTOR if self.post_obs_bias_count > 0 else 1.0)
-        relevant_obs = self.obstacles_relevant_for_points(base_pts, extra=margin)
+        relevant_obs = self.obstacles_relevant_for_points(base_pts, extra=self.obstacle_extra(margin))
         self.active_obstacles = relevant_obs
         if relevant_obs:
             ref_pts, ref_heads, ref_curv = self.filter_ref_points_near_obstacles(
@@ -401,42 +621,68 @@ class MPCController(Node):
         else:
             ref_pts, ref_heads, ref_curv = base_pts, base_heads, base_curv
         if not ref_pts:
-            return 1e8
+            return lambda u: 1e8
         rejoin_factor = (1.0 + REJOIN_GAIN) if self.post_obs_bias_count > 0 else 1.0
-        total = 0.0; big = 1e9
-        for k, (st, rp, rh, curv) in enumerate(zip(states, ref_pts, ref_heads, ref_curv)):
-            x, y, yaw, vk = st; rx, ry = rp
-            # [ca_ws] era: if self.states_hit_obstacle(...): return big  (patamar sem gradiente)
-            r_soft = OBSTACLE_RADIUS + OBSTACLE_SOFT_MARGIN
-            for (ox, oy) in relevant_obs:
-                d_obs = math.hypot(x - ox, y - oy)
-                if d_obs < r_soft:
-                    total += W_OBSTACLE_SOFT * (r_soft - d_obs) ** 2
-            dist = math.hypot(x - rx, y - ry); total += w_cross_track * dist * dist
-            if dist > TRACK_HALF_WIDTH: total += big * (dist - TRACK_HALF_WIDTH + 1.0)
-            hd = abs(self.normalize_angle(yaw - rh)); total += w_heading * hd
-            total += rejoin_factor * (k / max(1, H)) * w_terminal * dist
-            # v_ref
-            eps = 1e-6
-            v_curv = V_MAX if abs(curv) < eps else math.sqrt(max(MAX_LAT_ACC/(abs(curv)+eps), 0.0))
-            v_curv = max(V_MIN, min(V_MAX, v_curv))
-            heading_scaler = max(0.2, 1.0 - 0.95 * (hd / (math.pi / 2.0)))
-            cte_scaler = max(0.25, 1.0 - 1.5 * dist)
-            v_ref = max(V_MIN, min(V_MAX, v_curv * heading_scaler * cte_scaler))
-            total += 3.5 * (vk - v_ref) ** 2
-            v_soft_max = v_ref * (1.0 + V_SAFETY_MARGIN)
-            if vk > v_soft_max: total += 300.0 * (vk - v_soft_max) ** 2
-        total += w_control_effort * sum(float(v) ** 2 for v in control_v)
-        total += w_control_effort * sum(float(g) ** 2 for g in control_g)
-        for k in range(H - 1):
-            total += w_control_smooth * (control_v[k+1] - control_v[k]) ** 2
-            total += w_control_smooth * (control_g[k+1] - control_g[k]) ** 2
-        return float(total)
+        big = 1e9; eps = 1e-6
+        K = min(H, len(ref_pts))                       # zip(states, ref...) do original
+        ref = []
+        for k in range(K):
+            c_k = abs(ref_curv[k])
+            v_c = V_MAX if c_k < eps else math.sqrt(max(MAX_LAT_ACC / (c_k + eps), 0.0))
+            ref.append((ref_pts[k][0], ref_pts[k][1], ref_heads[k], max(V_MIN, min(V_MAX, v_c)),
+                        rejoin_factor * (k / max(1, H)) * w_terminal))
+        # [ca_ws] (x, y, raio do custo suave) de cada obstaculo
+        obs = [(ox, oy, self.obs_radius((ox, oy)) + OBSTACLE_SOFT_MARGIN) for ox, oy in relevant_obs]
+        x0, y0, yaw0 = self.x, self.y, self.yaw
+        cos, sin, tan, hypot, pi = math.cos, math.sin, math.tan, math.hypot, math.pi
+        two_pi = 2.0 * pi; half_pi = pi / 2.0
+
+        def cost(u):
+            u = u.tolist() if hasattr(u, 'tolist') else list(u)
+            cv = u[:H]; cg = u[H:]
+            if min(cv) < V_MIN or max(cv) > V_MAX: return 1e8
+            if max(abs(g) for g in cg) > GAMMA_MAX: return 1e8
+            x, y, yaw = x0, y0, yaw0
+            total = 0.0
+            for k in range(K):
+                v = cv[k]; rx, ry, rh, v_c, w_k = ref[k]
+                # rollout = simulate_vehicle_dynamics
+                x += v * cos(yaw) * dt
+                y += v * sin(yaw) * dt
+                yaw += (v / WHEEL_BASE) * tan(cg[k]) * dt
+                # [ca_ws] obstaculo: custo suave W*(R_SOFT - d)^2 (era: patamar 1e9 sem gradiente)
+                for ox, oy, r_soft in obs:
+                    d_obs = hypot(x - ox, y - oy)
+                    if d_obs < r_soft:
+                        total += W_OBSTACLE_SOFT * (r_soft - d_obs) ** 2
+                dist = hypot(x - rx, y - ry)
+                total += w_cross_track * dist * dist
+                if dist > TRACK_HALF_WIDTH: total += big * (dist - TRACK_HALF_WIDTH + 1.0)
+                hd = abs((yaw - rh + pi) % two_pi - pi)
+                total += w_heading * hd
+                total += w_k * dist
+                heading_scaler = max(0.2, 1.0 - 0.95 * (hd / half_pi))
+                cte_scaler = max(0.25, 1.0 - 1.5 * dist)
+                v_ref = max(V_MIN, min(V_MAX, v_c * heading_scaler * cte_scaler))
+                total += 3.5 * (v - v_ref) ** 2
+                ex = v - v_ref * (1.0 + V_SAFETY_MARGIN)
+                if ex > 0.0: total += 300.0 * ex * ex
+            total += w_control_effort * (sum(v * v for v in cv) + sum(g * g for g in cg))
+            sm = 0.0
+            for k in range(H - 1):
+                dv = cv[k + 1] - cv[k]; dg = cg[k + 1] - cg[k]
+                sm += dv * dv + dg * dg
+            total += w_control_smooth * sm
+            return total
+
+        return cost
 
     # ---------- Local ref helpers ----------
     def get_local_reference_base(self, start_idx, H=None):
         if not self.ref_path: return [], [], []
         H = H if H is not None else self.H
+        if REF_SPEED_SPACING:
+            return self.speed_spaced_reference(start_idx, H)
         end_idx = min(len(self.ref_path), start_idx + H * 3)
         pts = self.ref_path[start_idx:end_idx]
         heads = self.path_headings[start_idx:end_idx]
@@ -452,14 +698,43 @@ class MPCController(Node):
             base_curv.append(self.path_curvatures[-1] if self.path_curvatures else 0.0)
         return base_pts[:H], base_heads[:H], base_curv[:H]
 
-    def filter_ref_points_near_obstacles(self, pts, heads, curv, obstacles, margin=PATH_FILTER_MARGIN):
+    def speed_spaced_reference(self, start_idx, H):
+        """[ca_ws] H pontos ao longo do caminho a partir de start_idx, o ponto k a (k+1)*v*dt
+        (interpolados; rumo e curvatura do segmento). Ver REF_SPEED_SPACING."""
+        v_sp = max(REF_SPACING_V_MIN, min(V_MAX, float(self.prev_v_cmd) + REF_SPACING_LEAD))
+        step = v_sp * dt
+        cum = self.path_cumdist; path = self.ref_path; n = len(path)
+        start_idx = int(max(0, min(start_idx, n - 1)))
+        s0 = cum[start_idx]
+        pts, heads, curv = [], [], []
+        j = start_idx
+        for k in range(H):
+            s = s0 + (k + 1) * step
+            while j < n - 1 and cum[j + 1] < s:
+                j += 1
+            if j >= n - 1:
+                pts.append(path[-1]); heads.append(self.path_headings[-1])
+                curv.append(self.path_curvatures[-1] if self.path_curvatures else 0.0)
+                continue
+            seg = cum[j + 1] - cum[j]
+            t = 0.0 if seg <= 1e-9 else min(1.0, max(0.0, (s - cum[j]) / seg))
+            (x1, y1), (x2, y2) = path[j], path[j + 1]
+            pts.append((x1 + t * (x2 - x1), y1 + t * (y2 - y1)))
+            heads.append(self.path_headings[j])
+            c1 = self.path_curvatures[j] if self.path_curvatures else 0.0
+            c2 = self.path_curvatures[j + 1] if self.path_curvatures else 0.0
+            curv.append(max(c1, c2))
+        return pts, heads, curv
+
+    def filter_ref_points_near_obstacles(self, pts, heads, curv, obstacles, margin=None):
+        margin = PATH_FILTER_MARGIN if margin is None else margin  # [ca_ws] valor atual (parametro)
         if not obstacles: return pts, heads, curv
-        r2 = (OBSTACLE_RADIUS + margin) ** 2
+        r2s = [(ox, oy, (self.obs_radius((ox, oy)) + margin) ** 2) for (ox, oy) in obstacles]  # [ca_ws]
         f_pts, f_heads, f_curv = [], [], []
         for (p, h, c) in zip(pts, heads, curv):
             rx, ry = p
             close = False
-            for (ox, oy) in obstacles:
+            for (ox, oy, r2) in r2s:
                 dx = rx - ox; dy = ry - oy
                 if (dx*dx + dy*dy) <= r2:
                     close = True; break
@@ -484,8 +759,15 @@ class MPCController(Node):
         g0 = [float(np.clip(g, -GAMMA_MAX + epsb, GAMMA_MAX - epsb)) for g in g0]
         init = v0 + g0
         bounds = [(V_MIN, V_MAX)] * H + [(-GAMMA_MAX, GAMMA_MAX)] * H
-        result = minimize(self.mpc_cost_function, init, method='L-BFGS-B', bounds=bounds,
-                          options={'maxiter': 32, 'ftol': MPC_FTOL})
+        # [ca_ws] era minimize(self.mpc_cost_function, ...): recalculava a referencia em cada avaliacao
+        cost = self.build_cost(H)
+        result = minimize(cost, init, method='L-BFGS-B', bounds=bounds,
+                          options={'maxiter': int(MPC_MAXITER), 'ftol': MPC_FTOL})
+        # [ca_ws] success=False tambem quando chega as 32 iteracoes; o resultado continua a ser
+        # melhor do que o warm start (que nao foi otimizado e as vezes vai contra o obstaculo).
+        # Antes deitava-se fora e usava-se o warm start -> "STOP: sem trajetoria livre".
+        if not result.success and float(result.fun) < cost(init):
+            result.success = True
         if result.success:
             v_seq = [float(np.clip(v, V_MIN, V_MAX)) for v in result.x[:H]]
             g_seq = [float(np.clip(g, -GAMMA_MAX, GAMMA_MAX)) for g in result.x[H:]]
@@ -553,13 +835,14 @@ class MPCController(Node):
         self.marker_pub.publish(ma)
 
     # ---------- Planeamento auxiliar ----------
-    def plan_from_index(self, start_idx, warm_v, warm_g, H=H_LONG):
+    def plan_from_index(self, start_idx, warm_v, warm_g, H=None):
+        H = H_LONG if H is None else H  # [ca_ws] valor atual (parametro)
         """Tenta planear a partir de start_idx (override) e valida: sem colisão e dentro do 'tubo'."""
         self.ref_start_override = int(start_idx)
         ok, v, g, states = self.run_optimization(H, warm_v, warm_g)
         base_pts, _, _ = self.get_local_reference_base(start_idx, H=H)
         margin = PATH_FILTER_MARGIN * (FILTER_MARGIN_AFTER_FACTOR if self.post_obs_bias_count > 0 else 1.0)
-        rel = self.obstacles_relevant_for_points(base_pts, extra=margin)
+        rel = self.obstacles_relevant_for_points(base_pts, extra=self.obstacle_extra(margin))
         self.ref_start_override = None
         # validações
         if self.states_hit_obstacle(states, rel, appear_extra=0.0):
@@ -583,7 +866,8 @@ class MPCController(Node):
 
         # obstáculos relevantes ao curto
         base_pts_short, _, _ = self.get_local_reference_base(idx_now, H=H_SHORT)
-        relevant_obs_now = self.obstacles_relevant_for_points(base_pts_short, extra=PATH_FILTER_MARGIN)
+        relevant_obs_now = self.obstacles_relevant_for_points(
+            base_pts_short, extra=self.obstacle_extra(PATH_FILTER_MARGIN))
 
         # plano curto default
         succ_s, v_s, g_s, states_s = self.run_optimization(H_SHORT, self.control_sequence_v, self.control_sequence_gamma)

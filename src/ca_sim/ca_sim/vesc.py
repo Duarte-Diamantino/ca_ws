@@ -30,6 +30,16 @@ PROFILES = {
 }
 
 
+# Geometria do carro real (Traxxas 1/10), medida no CAD (CA_SIM/carro_com_rodas.stl).
+# E a do carro no Gazebo; a dos controladores esta em PROFILES (wheelbase 0.335 != 0.324).
+CAR = dict(wheelbase=0.324, track=0.1975, wheel_radius=0.0545)
+
+# Escala da pista FNR: o desenho map_200.pgm estava a 0.0121 m/px (lado menor 6.49 m);
+# o lado menor real e 7 m (ver ca_gazebo/scripts/gerar_mundo.py). O caminho Q e os obstaculos
+# dos testes estao multiplicados por este fator.
+TRACK_SCALE = 7.0 / (536 * 0.0121)
+
+
 class VescCalibration:
     """Converte comandos do VESC em velocidade e angulo de direcao (modelo bicicleta)."""
 
@@ -52,6 +62,23 @@ class VescCalibration:
         ratio = (float(servo_pos) - self.servo_center) / self.servo_span
         ratio = max(-1.0, min(1.0, ratio))
         return self.steer_sign * ratio * self.steer_max
+
+    # inversas (para conduzir o carro com velocidade / angulo, ex. teclado)
+    def motor_cmd(self, v):
+        """Comando do motor (RPM) para a velocidade v [m/s]."""
+        return float(v) * self.k_speed
+
+    def servo_pos(self, delta):
+        """Posicao do servo para o angulo delta [rad] (positivo = esquerda), saturado."""
+        ratio = float(delta) / (self.steer_sign * self.steer_max)
+        ratio = max(-1.0, min(1.0, ratio))
+        return self.servo_center + ratio * self.servo_span
+
+    @classmethod
+    def from_profile(cls, name):
+        p = PROFILES[name]
+        return cls(p['speed_cmd_per_mps'], p['servo_center'], p['servo_span'],
+                   p['steer_max_rad'], p['steer_sign'])
 
 
 # parametros ROS comuns aos simuladores (nome -> default = calibracao do MPC)

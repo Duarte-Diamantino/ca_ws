@@ -3,8 +3,10 @@ project(ca_gazebo)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY config launch urdf worlds
+install(DIRECTORY config launch meshes urdf worlds
   DESTINATION share/${PROJECT_NAME})
+# scripts/gerar_mundo.py gera worlds/pista.sdf, worlds/media/pista.png, meshes/cone*.stl e o
+# mapa do pickup_description (corre-se a mao, o resultado esta no git)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

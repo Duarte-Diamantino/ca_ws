@@ -15,6 +15,8 @@
 #include <mutex>
 #include <memory>
 #include <cstdint>
+#include <map>
+#include <string>
 
 struct Pt { double x, y; };
 
@@ -71,6 +73,39 @@ private:
   static constexpr double SERVO_MIN = 0.11781;
   static constexpr double GOAL_TOL_DEFAULT = 0.05;  // parametro "goal_tol"
   double goal_tol_ = GOAL_TOL_DEFAULT;
+  // [ca_ws] Parametros novos (ver README). Por defeito o comportamento e o de antes, exceto as
+  // correcoes do progresso e do fim do caminho; o simulador usa config/dwa.yaml.
+  static constexpr double V_CAL = 3.0;   // calibracao do VESC: MAX_RAW corresponde a V_CAL m/s
+  double v_max_ = V_MAX;                 // velocidade maxima amostrada (era sempre V_MAX)
+  double obs_influence_ = 1.0e9;         // [m] a recompensa da distancia aos obstaculos satura aqui
+  bool use_marker_size_ = false;         // raio do obstaculo = scale.x/2 do marker
+  double car_half_width_ = 0.10;         // com use_marker_size: distancia minima = raio + isto + margem
+  double obstacle_margin_ = 0.10;
+  int search_ahead_ = 30;                // pontos a frente onde se procura o ponto mais proximo
+  std::vector<double> obstacle_r_;       // raio de cada obstaculo (0 = sem tamanho)
+  size_t progress_idx_ = 0;              // progresso ao longo do caminho (so avanca)
+  bool closed_loop_ = false;             // caminho fechado (primeiro ponto ~ ultimo): da voltas
+  bool finished_ = false;                // chegou ao fim: parado ate chegar um caminho novo
+  std::vector<Pt> last_path_;
+  OnSetParametersCallbackHandle::SharedPtr param_cb_;
+  double safeDistance(size_t i) const;
+  size_t windowClosestIdx(const Pt& p) const;
+  void updateProgress();
+  // [ca_ws] Desvio do caminho a volta dos obstaculos (como o USE_REF_SHIFT do MPC). Sem isto o DWA so
+  // via os obstaculos no horizonte de 1 s e o custo do caminho puxava-o para cima deles: com um
+  // obstaculo em cima do caminho ficava sem trajetorias seguras e parava (ou batia).
+  std::vector<Pt> raw_path_;             // caminho recebido; path_pts_ = este, desviado dos obstaculos
+  bool use_ref_shift_ = true;
+  double avoid_margin_ = 0.10;           // o caminho desviado passa a safeDistance + isto do obstaculo
+  double avoid_ramp_ = 2.0;              // m de caminho para entrar/sair do desvio
+  double avoid_default_side_ = 1.0;      // obstaculo mesmo em cima do caminho: +1 esquerda, -1 direita
+  double avoid_center_tol_ = 0.05;       // |desvio lateral do obstaculo| abaixo disto = "em cima"
+  std::vector<double> shift_sig_;        // obstaculos do ultimo desvio (x, y, r): so refaz se mudarem
+  void rebuildPath();
+  std::vector<Pt> shiftPathAroundObstacles(const std::vector<Pt>& P, const std::vector<Pt>& obs,
+                                           const std::vector<double>& clear) const;
+  double freeSide(const std::vector<Pt>& P, const std::vector<double>& s, size_t ic, const Pt& left,
+                  double C, size_t self, const std::vector<Pt>& obs) const;
 
   // ROS interfaces
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
@@ -146,6 +181,17 @@ DwaGlobalFollower::DwaGlobalFollower()
   declare_parameter("prefer_pose_on_path", prefer_pose_on_path_);
   declare_parameter("pose_hit_radius", pose_hit_radius_);
   declare_parameter("goal_tol", goal_tol_);
+  declare_parameter("v_max", v_max_);                       // [ca_ws]
+  declare_parameter("obs_influence", obs_influence_);       // [ca_ws]
+  declare_parameter("use_marker_size", use_marker_size_);   // [ca_ws]
+  declare_parameter("car_half_width", car_half_width_);     // [ca_ws]
+  declare_parameter("obstacle_margin", obstacle_margin_);   // [ca_ws]
+  declare_parameter("search_ahead", search_ahead_);         // [ca_ws]
+  declare_parameter("use_ref_shift", use_ref_shift_);       // [ca_ws]
+  declare_parameter("avoid_margin", avoid_margin_);         // [ca_ws]
+  declare_parameter("avoid_ramp", avoid_ramp_);             // [ca_ws]
+  declare_parameter("avoid_default_side", avoid_default_side_);  // [ca_ws]
+  declare_parameter("avoid_center_tol", avoid_center_tol_); // [ca_ws]
 
   // Get parameters
   get_parameter("w_path", w_path_);
@@ -168,6 +214,58 @@ DwaGlobalFollower::DwaGlobalFollower()
   get_parameter("prefer_pose_on_path", prefer_pose_on_path_);
   get_parameter("pose_hit_radius", pose_hit_radius_);
   get_parameter("goal_tol", goal_tol_);
+  get_parameter("v_max", v_max_);
+  get_parameter("obs_influence", obs_influence_);
+  get_parameter("use_marker_size", use_marker_size_);
+  get_parameter("car_half_width", car_half_width_);
+  get_parameter("obstacle_margin", obstacle_margin_);
+  get_parameter("search_ahead", search_ahead_);
+  get_parameter("use_ref_shift", use_ref_shift_);
+  get_parameter("avoid_margin", avoid_margin_);
+  get_parameter("avoid_ramp", avoid_ramp_);
+  get_parameter("avoid_default_side", avoid_default_side_);
+  get_parameter("avoid_center_tol", avoid_center_tol_);
+
+  // [ca_ws] parametros ajustaveis com o DWA a correr (ros2 param set /dwa_global_follower v_max 1.5)
+  param_cb_ = add_on_set_parameters_callback([this](const std::vector<rclcpp::Parameter>& ps) {
+    std::map<std::string, double*> d = {
+      {"w_path", &w_path_}, {"w_vel", &w_vel_}, {"w_goal", &w_goal_}, {"w_obs", &w_obs_},
+      {"w_gamma", &w_gamma_}, {"w_index", &w_index_}, {"w_pose_snap", &w_pose_snap_},
+      {"horizon_s", &horizon_s_}, {"lookahead_dist", &lookahead_dist_},
+      {"min_safe_distance", &min_safe_distance_}, {"path_hit_radius", &path_hit_radius_},
+      {"pose_hit_radius", &pose_hit_radius_}, {"goal_tol", &goal_tol_}, {"v_max", &v_max_},
+      {"obs_influence", &obs_influence_}, {"car_half_width", &car_half_width_},
+      {"obstacle_margin", &obstacle_margin_}, {"avoid_margin", &avoid_margin_},
+      {"avoid_ramp", &avoid_ramp_}, {"avoid_default_side", &avoid_default_side_},
+      {"avoid_center_tol", &avoid_center_tol_}};
+    std::map<std::string, int*> i = {{"window_pts", &window_pts_}, {"required_hits", &required_hits_},
+      {"first_level_samples", &first_level_samples_}, {"second_level_samples", &second_level_samples_},
+      {"search_ahead", &search_ahead_}};
+    std::map<std::string, bool*> b = {{"require_two_hits", &require_two_hits_},
+      {"relax_if_none", &relax_if_none_}, {"prefer_pose_on_path", &prefer_pose_on_path_},
+      {"use_marker_size", &use_marker_size_}, {"use_ref_shift", &use_ref_shift_}};
+    rcl_interfaces::msg::SetParametersResult r;
+    r.successful = true;
+    for (const auto& p : ps) {
+      const auto& n = p.get_name();
+      if (d.count(n)) *d[n] = p.as_double();
+      else if (i.count(n)) *i[n] = static_cast<int>(p.as_int());
+      else if (b.count(n)) *b[n] = p.as_bool();
+      else continue;
+      RCLCPP_INFO(get_logger(), "parametro %s = %s", n.c_str(), p.value_to_string().c_str());
+    }
+    v_max_ = std::clamp(v_max_, 0.1, V_MAX);
+    first_level_samples_ = std::clamp(first_level_samples_, 1, 6);
+    second_level_samples_ = std::max(2, second_level_samples_);
+    avoid_ramp_ = std::max(avoid_ramp_, 0.05);
+    shift_sig_.clear();  // raios/margens podem ter mudado: refaz o desvio
+    rebuildPath();
+    return r;
+  });
+  avoid_ramp_ = std::max(avoid_ramp_, 0.05);
+  v_max_ = std::clamp(v_max_, 0.1, V_MAX);
+  first_level_samples_ = std::clamp(first_level_samples_, 1, 6);
+  second_level_samples_ = std::max(2, second_level_samples_);
 
   // Subscribers
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
@@ -232,10 +330,26 @@ void DwaGlobalFollower::pathCb(const nav_msgs::msg::Path::SharedPtr msg) {
     return a.ordem < b.ordem;
   });
 
-  path_pts_.clear();
-  path_pts_.reserve(ordered.size());
-  for (const auto &op : ordered) path_pts_.push_back(op.pt);
-  have_path_ = !path_pts_.empty();
+  raw_path_.clear();
+  raw_path_.reserve(ordered.size());
+  for (const auto &op : ordered) raw_path_.push_back(op.pt);
+  have_path_ = !raw_path_.empty();
+
+  // [ca_ws] o GUI/q_path republicam o mesmo caminho (1-10 Hz): so um caminho NOVO repoe o progresso
+  bool same = last_path_.size() == raw_path_.size() && path_pts_.size() == raw_path_.size();
+  for (size_t k = 0; same && k < raw_path_.size(); k += std::max<size_t>(1, raw_path_.size() / 16)) {
+    same = std::hypot(last_path_[k].x - raw_path_[k].x, last_path_[k].y - raw_path_[k].y) < 1e-3;
+  }
+  if (!same && have_path_) {
+    last_path_ = raw_path_;
+    shift_sig_.clear();
+    rebuildPath();  // path_pts_ = raw_path_ desviado dos obstaculos (mesmos indices)
+    closed_loop_ = raw_path_.size() > 10 &&
+      std::hypot(raw_path_.front().x - raw_path_.back().x, raw_path_.front().y - raw_path_.back().y) < 0.5;
+    progress_idx_ = have_odom_ ? closestPathIdxToPoint({x_, y_}) : 0;
+    finished_ = false;
+    RCLCPP_INFO(get_logger(), "Caminho novo: %zu pontos%s", path_pts_.size(), closed_loop_ ? " (volta fechada)" : "");
+  }
 
   // Publish gradient markers along the ordered path to visualize index/order
   publishPathMarkers();
@@ -247,26 +361,146 @@ void DwaGlobalFollower::joyCb(const sensor_msgs::msg::Joy::SharedPtr msg) {
 }
 
 void DwaGlobalFollower::obstaclesCb(const visualization_msgs::msg::MarkerArray::SharedPtr msg) {
-  std::lock_guard<std::mutex> lock(obstacles_mutex_);
-  obstacles_.clear();
-  
-  for (const auto& marker : msg->markers) {
-    if (marker.ns == "obstacle" || marker.ns == "obstacles") {
-      obstacles_.push_back({marker.pose.position.x, marker.pose.position.y});
+  {
+    std::lock_guard<std::mutex> lock(obstacles_mutex_);
+    obstacles_.clear();
+    obstacle_r_.clear();
+
+    for (const auto& marker : msg->markers) {
+      // [ca_ws] so ADD: o DELETEALL que a GUI manda antes dos cilindros (ns "obstacles", pose 0) era
+      // lido como um obstaculo em (0, 0)
+      if (marker.action != visualization_msgs::msg::Marker::ADD) continue;
+      if (marker.ns == "obstacle" || marker.ns == "obstacles") {
+        obstacles_.push_back({marker.pose.position.x, marker.pose.position.y});
+        obstacle_r_.push_back(marker.scale.x > 0 ? 0.5 * marker.scale.x : 0.0);  // [ca_ws]
+      }
     }
   }
+  rebuildPath();  // [ca_ws] so refaz o desvio se os obstaculos mudaram
 }
 
-size_t DwaGlobalFollower::findClosestIdx() const {
-  if (path_pts_.empty()) return 0;
-  
-  size_t idx = 0;
-  double md = 1e9;
-  for(size_t i = 0; i < path_pts_.size(); ++i) {
-    double d = std::hypot(path_pts_[i].x - x_, path_pts_[i].y - y_);
-    if(d < md) { md = d; idx = i; }
+// [ca_ws] path_pts_ = raw_path_ desviado dos obstaculos. Os indices sao os mesmos (cada ponto so anda
+// para o lado), por isso o progresso continua valido quando os obstaculos mudam.
+void DwaGlobalFollower::rebuildPath() {
+  if (raw_path_.empty()) return;
+  std::vector<Pt> obs;
+  std::vector<double> clear, sig;
+  {
+    std::lock_guard<std::mutex> lock(obstacles_mutex_);
+    for (size_t i = 0; i < obstacles_.size(); ++i) {
+      obs.push_back(obstacles_[i]);
+      clear.push_back(safeDistance(i) + avoid_margin_);
+      sig.insert(sig.end(), {obstacles_[i].x, obstacles_[i].y, clear.back()});
+    }
   }
-  return idx;
+  sig.push_back(use_ref_shift_ ? 1.0 : 0.0);
+  bool same = sig.size() == shift_sig_.size() && path_pts_.size() == raw_path_.size();
+  for (size_t k = 0; same && k < sig.size(); ++k) same = std::abs(sig[k] - shift_sig_[k]) < 1e-4;
+  if (same) return;
+  shift_sig_ = sig;
+  path_pts_ = (use_ref_shift_ && !obs.empty() && raw_path_.size() > 2)
+    ? shiftPathAroundObstacles(raw_path_, obs, clear) : raw_path_;
+  if (progress_idx_ >= path_pts_.size()) progress_idx_ = path_pts_.size() - 1;
+  double max_off = 0.0;
+  for (size_t k = 0; k < path_pts_.size(); ++k)
+    max_off = std::max(max_off, std::hypot(path_pts_[k].x - raw_path_[k].x, path_pts_[k].y - raw_path_[k].y));
+  if (max_off > 1e-3)
+    RCLCPP_INFO(get_logger(), "Caminho desviado dos obstaculos (ate %.2f m para o lado)", max_off);
+  publishPathMarkers();
+}
+
+// [ca_ws] Igual ao shift_path_around_obstacles do MPC. Em cada passagem do caminho perto de um obstaculo
+// (a menos de C = distancia de seguranca + avoid_margin), no ponto mais proximo mede-se o desvio lateral
+// do obstaculo (lat > 0: a esquerda) e o caminho e empurrado para o lado contrario ate ficar a C dele:
+// deslocamento total enquanto o caminho original estaria a < C e rampa em cosseno de avoid_ramp m antes
+// e depois. Com varios obstaculos fica, em cada ponto, o maior deslocamento.
+std::vector<Pt> DwaGlobalFollower::shiftPathAroundObstacles(const std::vector<Pt>& P, const std::vector<Pt>& obs,
+                                                            const std::vector<double>& clear) const {
+  const size_t n = P.size();
+  std::vector<double> s(n, 0.0);
+  for (size_t i = 1; i < n; ++i) s[i] = s[i - 1] + std::hypot(P[i].x - P[i - 1].x, P[i].y - P[i - 1].y);
+  std::vector<Pt> left(n);
+  for (size_t i = 0; i < n; ++i) {
+    size_t a = i == 0 ? 0 : i - 1, b = i + 1 < n ? i + 1 : n - 1;   // diferencas centrais (np.gradient)
+    double tx = P[b].x - P[a].x, ty = P[b].y - P[a].y;
+    double L = std::max(std::hypot(tx, ty), 1e-9);
+    left[i] = {-ty / L, tx / L};
+  }
+  std::vector<double> offset(n, 0.0), d(n);
+  for (size_t o = 0; o < obs.size(); ++o) {
+    const double C = clear[o];
+    for (size_t i = 0; i < n; ++i) d[i] = std::hypot(P[i].x - obs[o].x, P[i].y - obs[o].y);
+    size_t i = 0;
+    while (i < n) {
+      if (d[i] >= C) { ++i; continue; }
+      size_t j = i, ic = i;                       // passagem = pontos seguidos a menos de C
+      for (; j < n && d[j] < C; ++j) if (d[j] < d[ic]) ic = j;
+      double lat = (obs[o].x - P[ic].x) * left[ic].x + (obs[o].y - P[ic].y) * left[ic].y;
+      double side = std::abs(lat) > avoid_center_tol_ ? -std::copysign(1.0, lat)
+                                                      : freeSide(P, s, ic, left[ic], C, o, obs);
+      double amount = lat + side * C;             // o ponto fica a C do obstaculo, do lado "side"
+      double hold = std::sqrt(std::max(C * C - lat * lat, 0.0));
+      for (size_t k = 0; k < n; ++k) {
+        double ds = std::abs(s[k] - s[ic]);
+        double u = std::clamp((ds - hold) / avoid_ramp_, 0.0, 1.0);
+        double c = ds <= hold ? amount : amount * 0.5 * (1.0 + std::cos(M_PI * u));
+        if (std::abs(c) > std::abs(offset[k])) offset[k] = c;
+      }
+      i = j;
+    }
+  }
+  std::vector<Pt> Q(n);
+  for (size_t k = 0; k < n; ++k) Q[k] = {P[k].x + offset[k] * left[k].x, P[k].y + offset[k] * left[k].y};
+  return Q;
+}
+
+// [ca_ws] Obstaculo mesmo em cima do caminho: o lado com mais espaco (mais longe de outras partes do
+// caminho, ex. o fim do Q que volta a reta inicial, e dos outros obstaculos). Empate -> avoid_default_side.
+double DwaGlobalFollower::freeSide(const std::vector<Pt>& P, const std::vector<double>& s, size_t ic,
+                                   const Pt& left, double C, size_t self, const std::vector<Pt>& obs) const {
+  const double sides[2] = {1.0, -1.0};
+  double room[2];
+  for (int k = 0; k < 2; ++k) {
+    double cx = P[ic].x + sides[k] * C * left.x, cy = P[ic].y + sides[k] * C * left.y;
+    double r = 1e18;
+    for (size_t i = 0; i < P.size(); ++i)
+      if (std::abs(s[i] - s[ic]) > 2.0 * (C + avoid_ramp_)) r = std::min(r, std::hypot(P[i].x - cx, P[i].y - cy));
+    for (size_t o = 0; o < obs.size(); ++o)
+      if (o != self) r = std::min(r, std::hypot(obs[o].x - cx, obs[o].y - cy));
+    room[k] = r;
+  }
+  if (std::abs(room[0] - room[1]) < 0.05 || std::min(room[0], room[1]) > 2.0)
+    return avoid_default_side_ >= 0.0 ? 1.0 : -1.0;
+  return room[0] > room[1] ? 1.0 : -1.0;
+}
+
+// [ca_ws] Era o ponto mais proximo de TODO o caminho: num caminho que passa duas vezes perto do mesmo
+// sitio (ou cujo fim volta ao inicio) saltava para o outro troco. Agora e o progresso, que so avanca
+// (updateProgress, procura so search_ahead pontos a frente).
+size_t DwaGlobalFollower::findClosestIdx() const {
+  return std::min(progress_idx_, path_pts_.empty() ? 0 : path_pts_.size() - 1);
+}
+
+size_t DwaGlobalFollower::windowClosestIdx(const Pt& p) const {
+  size_t N = path_pts_.size(), best = progress_idx_;
+  double md = 1e18;
+  for (int k = 0; k <= search_ahead_ && N > 0; ++k) {
+    size_t i = closed_loop_ ? (progress_idx_ + k) % N : std::min(progress_idx_ + k, N - 1);
+    double d = std::hypot(path_pts_[i].x - p.x, path_pts_[i].y - p.y);
+    if (d < md) { md = d; best = i; }
+  }
+  return best;
+}
+
+void DwaGlobalFollower::updateProgress() {
+  if (!path_pts_.empty()) progress_idx_ = windowClosestIdx({x_, y_});
+}
+
+double DwaGlobalFollower::safeDistance(size_t i) const {
+  // [ca_ws] com use_marker_size: o obstaculo e o que e (raio do marker) + meia largura do carro + margem
+  if (use_marker_size_ && i < obstacle_r_.size() && obstacle_r_[i] > 0.0)
+    return obstacle_r_[i] + car_half_width_ + obstacle_margin_;
+  return min_safe_distance_;
 }
 
 size_t DwaGlobalFollower::closestPathIdxToPoint(const Pt& p) const {
@@ -298,12 +532,13 @@ bool DwaGlobalFollower::isTrajectorySafe(const std::vector<Pt>& traj) const {
   std::lock_guard<std::mutex> lock(obstacles_mutex_);
   
   for (const auto& traj_pt : traj) {
-    for (const auto& obs : obstacles_) {
+    for (size_t oi = 0; oi < obstacles_.size(); ++oi) {
+      const auto& obs = obstacles_[oi];
       double dx = traj_pt.x - obs.x;
       double dy = traj_pt.y - obs.y;
       double distance = std::hypot(dx, dy);
       
-      if (distance < min_safe_distance_) {
+      if (distance < safeDistance(oi)) {  // [ca_ws] era min_safe_distance_ para todos
         return false;
       }
     }
@@ -319,9 +554,12 @@ std::pair<double, double> DwaGlobalFollower::getLocalGoal() const {
   size_t closest_idx = findClosestIdx();
   double accumulated_dist = 0.0;
   
-  for (size_t i = closest_idx; i < path_pts_.size() - 1; i++) {
-    double dx = path_pts_[i+1].x - path_pts_[i].x;
-    double dy = path_pts_[i+1].y - path_pts_[i].y;
+  size_t N = path_pts_.size();
+  size_t steps_max = closed_loop_ ? N : N - 1 - std::min(closest_idx, N - 1);  // [ca_ws] volta fechada
+  for (size_t s = 0; s < steps_max; s++) {
+    size_t i = (closest_idx + s) % N, j = (i + 1) % N;
+    double dx = path_pts_[j].x - path_pts_[i].x;
+    double dy = path_pts_[j].y - path_pts_[i].y;
     double seg_dist = std::hypot(dx, dy);
     
     if (accumulated_dist + seg_dist >= lookahead_dist_) {
@@ -416,7 +654,9 @@ double DwaGlobalFollower::computeCost(const std::vector<Pt>& traj,
     size_t N = path_pts_.size();
     size_t start = findClosestIdx();
     for(int k = 0; k < window_pts_; ++k) {
-      const Pt &t = path_pts_[(start + k) % N];
+      // [ca_ws] era (start + k) % N: perto do fim de um caminho aberto a janela dava a volta para os
+      // primeiros pontos e puxava o carro de volta ao inicio (repetia o percurso)
+      const Pt &t = path_pts_[closed_loop_ ? (start + k) % N : std::min(start + k, N - 1)];
       double dmin = 1e9;
       for(const auto &p : traj) {
         dmin = std::min(dmin, std::hypot(p.x - t.x, p.y - t.y));
@@ -443,7 +683,7 @@ double DwaGlobalFollower::computeCost(const std::vector<Pt>& traj,
       }
     }
   }
-  cost += w_obs_ * min_obstacle_dist;
+  cost += w_obs_ * std::min(min_obstacle_dist, obs_influence_);  // [ca_ws] longe = indiferente
   
   // 4. Velocity cost (prefer lower |v| to be smoother)
   cost += -w_vel_ * std::abs(v);
@@ -458,7 +698,7 @@ double DwaGlobalFollower::computeCost(const std::vector<Pt>& traj,
 
   // 7. Index-bias cost — favor trajectories that end near LOWER path indices
   if (!path_pts_.empty()) {
-    size_t idx_end = closestPathIdxToPoint(traj.back());
+    size_t idx_end = windowClosestIdx(traj.back());  // [ca_ws] era o mais proximo de todo o caminho
     double denom = std::max<size_t>(1, path_pts_.size() - 1);
     double idx_score = 1.0 - static_cast<double>(idx_end) / static_cast<double>(denom);
     cost += w_index_ * idx_score;
@@ -482,12 +722,24 @@ void DwaGlobalFollower::update() {
     return;
   }
 
+  updateProgress();  // [ca_ws]
   // Check if reached final goal
+  // [ca_ws] Antes: so a distancia ao ultimo ponto < goal_tol. A alta velocidade o carro passava o ponto
+  // sem entrar na janela e repetia o percurso. Agora tambem acaba quando o progresso chega ao fim, e
+  // fica parado (com a direcao ao centro) ate chegar um caminho novo. Caminho fechado: nunca acaba.
+  // A distancia ao ultimo ponto so conta depois de 80% do caminho (como o MPC): o caminho Q acaba em
+  // cima da reta inicial e o carro "chegava" logo no arranque.
   double dist_to_goal = std::hypot(x_ - path_pts_.back().x, y_ - path_pts_.back().y);
-  if (dist_to_goal < goal_tol_) {
+  bool near_end = progress_idx_ >= static_cast<size_t>(0.8 * (path_pts_.size() - 1));
+  if (!closed_loop_ && (finished_ || (near_end && dist_to_goal < goal_tol_) || progress_idx_ + 1 >= path_pts_.size())) {
+    if (!finished_) RCLCPP_INFO(get_logger(), "Fim do caminho: carro parado (a espera de um caminho novo).");
+    finished_ = true;
     std_msgs::msg::Float64 stop_speed;
     stop_speed.data = 0.0;
     speed_pub_->publish(stop_speed);
+    std_msgs::msg::Float64 center;
+    center.data = SERVO_C;
+    steer_pub_->publish(center);
     marker_pub_->publish(visualization_msgs::msg::MarkerArray());
     return;
   }
@@ -528,12 +780,12 @@ void DwaGlobalFollower::update() {
   
   // Main directions (forward and backward)
   std::vector<std::pair<double, double>> directions = {
-    {V_MAX, 0.0},          // Forward straight
-    {V_MAX, GAMMA_MAX/2},  // Forward left
-    {V_MAX, -GAMMA_MAX/2}, // Forward right
-    {-V_MAX, 0.0},         // Backward straight
-    {-V_MAX, GAMMA_MAX/2}, // Backward left
-    {-V_MAX, -GAMMA_MAX/2} // Backward right
+    {v_max_, 0.0},          // Forward straight      [ca_ws] v_max_ (era V_MAX = 3 m/s fixo)
+    {v_max_, GAMMA_MAX/2},  // Forward left
+    {v_max_, -GAMMA_MAX/2}, // Forward right
+    {-v_max_, 0.0},         // Backward straight
+    {-v_max_, GAMMA_MAX/2}, // Backward left
+    {-v_max_, -GAMMA_MAX/2} // Backward right
   };
 
   for(int i = 0; i < first_level_samples_; ++i) {
@@ -652,14 +904,14 @@ void DwaGlobalFollower::update() {
     double base_v = std::get<1>(first_level[i]);
     double base_g = std::get<2>(first_level[i]);
     
-    double v_range = (base_v > 0) ? V_MAX/2 : V_MAX/3;
+    double v_range = (base_v > 0) ? v_max_/2 : v_max_/3;
     double g_range = GAMMA_MAX/2;
     
     double dv = 2 * v_range / (second_level_samples_ - 1);
     double dg = 2 * g_range / (second_level_samples_ - 1);
     
     for(int iv = 0; iv < second_level_samples_; ++iv) {
-      double v = std::clamp(base_v - v_range + iv * dv, -V_MAX, V_MAX);
+      double v = std::clamp(base_v - v_range + iv * dv, -v_max_, v_max_);
       for(int ig = 0; ig < second_level_samples_; ++ig) {
         double g = std::clamp(base_g - g_range + ig * dg, -GAMMA_MAX, GAMMA_MAX);
         
@@ -759,12 +1011,12 @@ void DwaGlobalFollower::update() {
     for(size_t i = 0; i < 2 && i < first_level.size(); ++i) {
       double base_v = std::get<1>(first_level[i]);
       double base_g = std::get<2>(first_level[i]);
-      double v_range = (base_v > 0) ? V_MAX/2 : V_MAX/3;
+      double v_range = (base_v > 0) ? v_max_/2 : v_max_/3;
       double g_range = GAMMA_MAX/2;
       double dv = 2 * v_range / (second_level_samples_ - 1);
       double dg = 2 * g_range / (second_level_samples_ - 1);
       for(int iv = 0; iv < second_level_samples_; ++iv) {
-        double v = std::clamp(base_v - v_range + iv * dv, -V_MAX, V_MAX);
+        double v = std::clamp(base_v - v_range + iv * dv, -v_max_, v_max_);
         for(int ig = 0; ig < second_level_samples_; ++ig) {
           double g = std::clamp(base_g - g_range + ig * dg, -GAMMA_MAX, GAMMA_MAX);
           auto traj = simulateTrajectory(v, g, steps);
@@ -835,7 +1087,7 @@ void DwaGlobalFollower::update() {
   // Publish commands
   if (!best_traj.empty()) {
     std_msgs::msg::Float64 sp, st;
-    sp.data = std::clamp(best_v / V_MAX * MAX_RAW, -MAX_RAW, MAX_RAW);
+    sp.data = std::clamp(best_v / V_CAL * MAX_RAW, -MAX_RAW, MAX_RAW);  // [ca_ws] calibracao fixa (era / V_MAX)
     
     double steer_angle = (best_v >= 0) ? -best_g : best_g;
     double span = SERVO_MAX - SERVO_C;
@@ -844,6 +1096,14 @@ void DwaGlobalFollower::update() {
     
     speed_pub_->publish(sp);
     steer_pub_->publish(st);
+  } else {
+    // [ca_ws] nenhuma trajetoria segura: antes nao publicava nada e o VESC ficava com o ultimo comando
+    // (o carro seguia para o obstaculo). Agora trava.
+    std_msgs::msg::Float64 stop_speed;
+    stop_speed.data = 0.0;
+    speed_pub_->publish(stop_speed);
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                         "Sem trajetoria segura (obstaculo demasiado perto): carro parado");
   }
 }
 

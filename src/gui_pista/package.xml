@@ -15,6 +15,7 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-matplotlib</exec_depend>
   <exec_depend>python3-pil</exec_depend>
+  <exec_depend>python3-yaml</exec_depend> <!-- [ca_ws] load_map_yaml -->
 
   <test_depend>python3-pytest</test_depend>
 

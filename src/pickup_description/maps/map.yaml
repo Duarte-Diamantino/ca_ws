@@ -1,7 +1,9 @@
-image: map_200.pgm
-resolution: 0.0121
-origin: [-1.2, -0.75, 0.0]
+# Pista FNR (Conducao Autonoma) a escala real: lado menor = 7.0 m.
+# Gerado por ca_gazebo/scripts/gerar_mundo.py a partir do map_200.pgm (que estava a
+# 0.0121 m/px = 6.49 m de lado menor) -> escala x1.0793 e 2x mais resolucao.
+image: fnr_ca.png
+resolution: 0.006530
+origin: [-1.2952, -0.8095, 0.0]
 negate: 0
 occupied_thresh: 0.65
 free_thresh: 0.196
-

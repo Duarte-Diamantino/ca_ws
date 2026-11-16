@@ -10,6 +10,7 @@ from PIL import Image
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
+from .mixins.carlive import CarLiveMixin  # [ca_ws] carro da simulacao no mapa
 from .mixins.drawing import DrawingMixin
 from .mixins.environment import EnvironmentMixin
 from .mixins.interaction import InteractionMixin
@@ -23,6 +24,7 @@ matplotlib.use("TkAgg")
 
 
 class TrajApp(
+    CarLiveMixin,  # [ca_ws] tem de vir antes do RenderingMixin (_perform_redraw)
     ScaleMixin,
     EnvironmentMixin,
     RenderingMixin,
@@ -44,6 +46,8 @@ class TrajApp(
         self.image_original = None
         self.image_scale_x = 1.0
         self.image_scale_y = 1.0
+        self.fixed_ppm = None  # [ca_ws] px/m do map.yaml (None = escala pela grelha, como antes)
+        self.map_yaml_path = None  # [ca_ws]
 
         self.mode = None
         self.obstacle_points = []
@@ -86,7 +90,10 @@ class TrajApp(
         self.ros_inited = False
         self.ref_path_topic = "reference_path"
         self.map_topic = "occupancy_grid"
-        self.limit_topic = "obstacles_marker"
+        # [ca_ws] era "obstacles_marker": o mesmo topico do obstacle_publisher, e o
+        # dwa_global_follower apaga a lista de obstaculos a cada MarkerArray que la chega (so
+        # guarda ns "obstacle(s)"; os do GUI sao "limits"/"path_obstacles"/"objectives").
+        self.limit_topic = "gui_pista/markers"  # [ca_ws]
         self.limit_max_points = 2000
         self.frame_id = "map"
         self.origin_x_m = 0.0
@@ -197,6 +204,9 @@ class TrajApp(
         row = 0
         ttk.Button(tab_map, text="Carregar Imagem", command=self.load_image, style="Accent.TButton")            .grid(row=row, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 8))
         row += 1
+        ttk.Button(tab_map, text="Carregar mapa (map.yaml)", command=self.load_map_yaml_dialog,  # [ca_ws]
+                   style="Accent.TButton").grid(row=row, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 8))  # [ca_ws]
+        row += 1  # [ca_ws]
         make_label(tab_map, "Resolucao da grid (linhas):").grid(row=row, column=0, sticky="w", padx=6, pady=4)
         self.grid_slider_var = tk.DoubleVar(value=self.grid_count)
         self.grid_slider = ttk.Scale(
@@ -857,14 +867,17 @@ class TrajApp(
             self._handling_stretch_y = False
 
     # Image & grid -----------------------------------------------------
-    def load_image(self):
-        path = filedialog.askopenfilename(
-            filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif")]
-        )
+    def load_image(self, path=None):  # [ca_ws] path opcional (usado por load_map_yaml)
+        if path is None:  # [ca_ws]
+            path = filedialog.askopenfilename(
+                filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.gif *.pgm")]  # [ca_ws] +pgm
+            )
         if not path:
             return
         try:
             loaded = Image.open(path).convert("RGB")
+            self.fixed_ppm = None  # [ca_ws] imagem qualquer -> volta a escala pela grelha
+            self.map_yaml_path = None  # [ca_ws]
             self.image_original = loaded
             self.image_scale_x = 1.0
             self.image_scale_y = 1.0
@@ -897,8 +910,62 @@ class TrajApp(
 
             self.update_scale()
             self.update_status("Imagem carregada")
+            return True  # [ca_ws]
         except Exception as exc:
             messagebox.showerror("Erro", f"Erro ao carregar imagem: {exc}")
+
+    def load_map_yaml_dialog(self):  # [ca_ws]
+        path = filedialog.askopenfilename(filetypes=[("map_server YAML", "*.yaml *.yml")])  # [ca_ws]
+        if path:  # [ca_ws]
+            self.load_map_yaml(path)  # [ca_ws]
+
+    def load_map_yaml(self, path):  # [ca_ws]
+        """[ca_ws] Carrega um mapa do map_server (imagem + resolution + origin).
+
+        Fica tudo no frame 'map' (= mundo do Gazebo): escala fixa 1/resolution px/m, eixos X+
+        direita / Y+ cima e offsets tais que o centro do pixel (i, j) do canvas vai para
+        origin + ((i + 0.5) * res, (H - 0.5 - j) * res), como o map_server. A ancora "origem no
+        start" e desligada para o caminho nao ser deslocado para (0, 0).
+        """
+        import os  # [ca_ws]
+        import yaml  # [ca_ws]
+        try:  # [ca_ws]
+            with open(path) as f:  # [ca_ws]
+                meta = yaml.safe_load(f)  # [ca_ws]
+            img_path = meta["image"]  # [ca_ws]
+            if not os.path.isabs(img_path):  # [ca_ws]
+                img_path = os.path.join(os.path.dirname(os.path.abspath(path)), img_path)  # [ca_ws]
+            res = float(meta["resolution"])  # [ca_ws]
+            ox, oy = float(meta["origin"][0]), float(meta["origin"][1])  # [ca_ws]
+            if len(meta["origin"]) > 2 and abs(float(meta["origin"][2])) > 1e-9:  # [ca_ws]
+                self.log_msg("Aviso: origin com yaw != 0 no map.yaml nao e suportado (ignorado).")  # [ca_ws]
+        except Exception as exc:  # [ca_ws]
+            messagebox.showerror("Mapa", f"Erro ao ler {path}: {exc}")  # [ca_ws]
+            return False  # [ca_ws]
+        if not self.load_image(img_path):  # [ca_ws]
+            return False  # [ca_ws]
+        height = self.image.size[1]  # [ca_ws]
+        self.fixed_ppm = 1.0 / res  # [ca_ws]
+        self.map_yaml_path = path  # [ca_ws]
+        self.axis_x_vec, self.axis_y_vec = (1.0, 0.0), (0.0, -1.0)  # [ca_ws] X+ direita, Y+ cima
+        self.axis_x_var.set("Direita")  # [ca_ws]
+        self.axis_y_var.set("Cima")  # [ca_ws]
+        self.frame_id = "map"  # [ca_ws]
+        self.frame_id_var.set("map")  # [ca_ws]
+        self.anchor_origin_start.set(False)  # [ca_ws]
+        self.origin_x_m = ox + 0.5 * res  # [ca_ws]
+        self.origin_y_m = oy + (height - 0.5) * res  # [ca_ws]
+        self.offx_var.set(self.origin_x_m)  # [ca_ws]
+        self.offy_var.set(self.origin_y_m)  # [ca_ws]
+        self.update_scale()  # [ca_ws]
+        self.log_msg(  # [ca_ws]
+            f"Mapa {os.path.basename(path)}: {self.image.size[0]}x{height} px a {res} m/px, "  # [ca_ws]
+            f"origin ({ox}, {oy}) -> frame 'map' (ancora no start desligada)"  # [ca_ws]
+        )  # [ca_ws]
+        self.update_status(f"Mapa carregado: {os.path.basename(path)}")  # [ca_ws]
+        if HAVE_ROS2:  # [ca_ws] frame map = mundo do Gazebo: mostra o carro da simulacao
+            self.start_car_live()  # [ca_ws]
+        return True  # [ca_ws]
 
     def update_grid(self, value):
         try:
@@ -912,11 +979,22 @@ class TrajApp(
 
 
 def main():
+    import argparse  # [ca_ws]
+    import os  # [ca_ws]
+    import sys  # [ca_ws]
+
+    # [ca_ws] --map <map.yaml> (ou GUI_PISTA_MAP): abre ja o mapa no frame 'map'. Os argumentos
+    # do ROS (--ros-args ...) que o launch acrescenta sao ignorados aqui.
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)  # [ca_ws]
+    parser.add_argument("--map", default=os.environ.get("GUI_PISTA_MAP", ""))  # [ca_ws]
+    cli, _ = parser.parse_known_args(sys.argv[1:])  # [ca_ws]
     root = tk.Tk()
     root.title("Planner: Hybrid A* + DWA + MPC + Race Line + Desenhar (pincel)")
     root.geometry("1550x950")
     apply_theme(root)
     app = TrajApp(master=root)
+    if cli.map:  # [ca_ws]
+        app.load_map_yaml(cli.map)  # [ca_ws]
 
     def on_close():
         try:

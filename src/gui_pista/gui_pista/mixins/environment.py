@@ -25,7 +25,10 @@ class EnvironmentMixin:
         if not (0 <= x < width and 0 <= y < height):
             return False
 
-        margin = max(10, self.grid_spacing / 3 if self.grid_spacing else 10)
+        # [ca_ws] era grid_spacing/3: os pontos do flood/obstaculo sao centros de quadricula
+        # afastados de grid_spacing, logo com raio gs/3 ~65% da zona marcada continuava livre
+        # (paredes porosas). 0.75*gs > meia diagonal (0.707*gs) -> a quadricula fica toda tapada.
+        margin = max(10, self.grid_spacing * 0.75 if self.grid_spacing else 10)  # [ca_ws]
         for ox, oy in self.obstacle_points:
             if abs(x - ox) < margin and abs(y - oy) < margin:
                 if math.hypot(x - ox, y - oy) < margin:
@@ -117,8 +120,24 @@ class EnvironmentMixin:
                     (1, -1),
                     (1, 1),
                 ]:
+                    # [ca_ws] so passa para a vizinha se o segmento entre os dois centros tiver a
+                    # mesma cor: antes o flood so via os centros e saltava por cima de linhas mais
+                    # finas do que uma quadricula (limite branco da pista FNR com 24 linhas).
+                    npx = int((cx + dx) * self.grid_spacing + self.grid_spacing // 2)  # [ca_ws]
+                    npy = int((cy + dy) * self.grid_spacing + self.grid_spacing // 2)  # [ca_ws]
+                    if 0 <= npx < width and 0 <= npy < height and not self._segment_same_color(  # [ca_ws]
+                            px, py, npx, npy, reference):  # [ca_ws]
+                        continue  # [ca_ws]
                     queue.append((cx + dx, cy + dy))
         return points
+
+    def _segment_same_color(self, x0, y0, x1, y1, reference):  # [ca_ws]
+        """[ca_ws] True se todos os pixeis do segmento estao dentro da tolerancia de cor."""
+        n = int(max(abs(x1 - x0), abs(y1 - y0))) + 1  # [ca_ws]
+        xs = np.rint(np.linspace(x0, x1, n)).astype(int)  # [ca_ws]
+        ys = np.rint(np.linspace(y0, y1, n)).astype(int)  # [ca_ws]
+        cols = self.image_array[ys, xs].astype(int)  # [ca_ws]
+        return bool(np.all(np.abs(cols - np.asarray(reference).astype(int)) <= self.color_tolerance))  # [ca_ws]
 
     def circle_fill_grid(self, center_x, center_y, radius_px):
         """Return grid cell center points within a circle in pixel space.

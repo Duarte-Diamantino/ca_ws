@@ -62,11 +62,8 @@ def test_planeia_dois_objetivos_sem_obstaculos(app):
     assert math.hypot(ex - 520.0, ey - 200.0) < 18 + app.m2px(0.3), 'nao chegou ao ultimo objetivo'
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    'BUG CONHECIDO: o Hybrid A* encontra caminho a volta da parede (8-13 iteracoes), mas a fase '
-    'DWA seguinte fica "sem progresso"; apos 3 tentativas o segmento e saltado e o caminho final '
-    'fica VAZIO em vez de usar o caminho do Hybrid A*. Quando corrigires, este teste passa e o '
-    'xfail(strict) obriga-te a tirar esta marca.'))
+# [ca_ws] era xfail(strict): o DWA ficava "sem progresso" atras da parede, o segmento era saltado
+# e o caminho final ficava vazio. Corrigido em PlanningMixin._dwa_failed (usa o Hybrid A*).
 def test_contorna_parede(app):
     app.start_point = (60.0, 200.0)
     app.start_theta = 0.0

@@ -27,6 +27,19 @@ def test_velocidade_mpc():
     assert c.speed(3000.0) == pytest.approx(3.0 / 7.0)
 
 
+@pytest.mark.parametrize('name', sorted(PROFILES))
+def test_inversas_dao_a_volta(name):
+    c = VescCalibration.from_profile(name)
+    for v in (0.0, 0.5, 2.0, -1.0):
+        assert c.speed(c.motor_cmd(v)) == pytest.approx(v)
+    for deg in (0.0, 5.0, -12.0, 20.0):
+        d = math.radians(deg)
+        if abs(d) <= c.steer_max:
+            assert c.steer(c.servo_pos(d)) == pytest.approx(d)
+    assert c.servo_pos(0.0) == PROFILES[name]['servo_center']
+    assert c.servo_pos(10.0) == pytest.approx(c.servo_pos(c.steer_max))  # satura
+
+
 def test_mpc_e_dwa_tem_calibracoes_diferentes():
     """Documenta o problema do README: se isto falhar, alguem acertou as calibracoes."""
     mpc, dwa = PROFILES['mpc'], PROFILES['dwa']

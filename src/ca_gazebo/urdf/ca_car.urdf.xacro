@@ -1,27 +1,28 @@
 <?xml version="1.0"?>
 <!--
-  Carro 1/10 para o Gazebo Fortress (ignition-gazebo 6).
+  Traxxas 1/10 para o Gazebo Fortress (ignition-gazebo 6) e para o RViz.
 
-  Medidas: distancia entre eixos igual a dos controladores (0.335 m); bitola, raio das
-  rodas e massas sao estimativas de um carro 1/10 -> CONFIRMAR NO CARRO REAL.
+  Visual: as meshes do CAD (repo ca_sim_ros2: base_link.stl e roda_urfd_v3.stl, em mm -> scale 0.001).
+  Medidas tiradas do carro montado (CA_SIM/carro_com_rodas.stl):
+    eixos em x = 120 mm e 444 mm  -> distancia entre eixos 0.324 m (os controladores assumem 0.335)
+    rodas: diametro 109 mm (raio 0.0545), largura 43 mm, centros a +-98.75 mm -> bitola 0.1975 m
+    linha central do carro em y = +17.75 mm do referencial da mesh; carrocaria 568 x 193 x 117 mm
+  Colisao: caixa (carrocaria) + esferas (rodas), mais estavel que as meshes.
 
-  base_link = centro do eixo traseiro, a altura dos eixos (e a referencia do modelo
-  bicicleta usado pelo MPC/DWA e pelo kinematic_sim).
+  base_link = centro do eixo traseiro, a altura dos eixos (referencia do modelo bicicleta).
 
   Atuacao "tipo VESC" (sem ros2_control):
-    - rodas de tras: JointController (velocidade imposta)     <- $(arg cmd_prefix)/wheel_rear_{left,right}  [rad/s]
-    - direcao:       JointPositionController (servo com velocidade maxima servo_rate)
-                                                               <- $(arg cmd_prefix)/steer_{left,right}       [rad]
-  O no ca_sim/vesc_to_gz converte /commands/motor/speed e /commands/servo/position nestes comandos.
-  (O plugin AckermannSteering do Fortress tem o ganho da direcao fixo em 1 -> servo com ~1 s de atraso.)
-
-  Sensores de "verdade": OdometryPublisher (pose do modelo no mundo = frame map, faz de EKF)
-  e JointStatePublisher.
+    rodas de tras: JointController (velocidade)            <- $(arg cmd_prefix)/wheel_rear_{left,right}  [rad/s]
+    direcao:       JointPositionController (servo, max servo_rate rad/s) <- $(arg cmd_prefix)/steer_{left,right} [rad]
+  O ca_sim/vesc_to_gz converte /commands/motor/speed e /commands/servo/position nestes comandos
+  e publica /joint_states (50 Hz) para o RViz. (O JointStatePublisher do Gazebo publicava a 1 kHz
+  e afogava o RViz em TF.)
+  "EKF perfeito": OdometryPublisher (pose do modelo no mundo = frame map).
 -->
 <robot name="ca_car" xmlns:xacro="http://www.ros.org/wiki/xacro">
-  <xacro:arg name="wheelbase" default="0.335"/>
-  <xacro:arg name="track" default="0.25"/>
-  <xacro:arg name="wheel_radius" default="0.05"/>
+  <xacro:arg name="wheelbase" default="0.324"/>
+  <xacro:arg name="track" default="0.1975"/>
+  <xacro:arg name="wheel_radius" default="0.0545"/>
   <xacro:arg name="steer_limit" default="0.55"/>
   <xacro:arg name="servo_rate" default="6.0"/>
   <xacro:arg name="cmd_prefix" default="/ca_car/cmd"/>
@@ -31,49 +32,115 @@
   <xacro:property name="W" value="$(arg track)"/>
   <xacro:property name="r" value="$(arg wheel_radius)"/>
   <xacro:property name="steer_limit" value="$(arg steer_limit)"/>
+  <xacro:property name="meshes" value="file://$(find ca_gazebo)/meshes"/>
   <xacro:property name="mu" value="1.0"/>
-  <xacro:property name="m_chassis" value="3.0"/>
+  <xacro:property name="m_chassis" value="2.6"/>
   <xacro:property name="m_wheel" value="0.15"/>
   <xacro:property name="m_knuckle" value="0.05"/>
-  <xacro:property name="chassis_l" value="0.45"/>
-  <xacro:property name="chassis_w" value="0.20"/>
-  <xacro:property name="chassis_h" value="0.06"/>
+  <!-- caixa de colisao da carrocaria (um pouco menor que a mesh) -->
+  <xacro:property name="cb_l" value="0.50"/>
+  <xacro:property name="cb_w" value="0.17"/>
+  <xacro:property name="cb_h" value="0.06"/>
+  <!-- centro da carrocaria em relacao ao base_link: mesh x = -0.120..0.448, z = 0..0.117 -->
+  <xacro:property name="cb_x" value="0.164"/>
+  <xacro:property name="cb_z" value="0.045"/>
 
-  <material name="carrocaria"><color rgba="0.10 0.45 0.85 1"/></material>
-  <material name="pneu"><color rgba="0.08 0.08 0.08 1"/></material>
-  <material name="frente"><color rgba="0.95 0.75 0.10 1"/></material>
+  <material name="carrocaria"><color rgba="0.08 0.35 0.80 1"/></material>
+  <material name="pneu"><color rgba="0.12 0.12 0.12 1"/></material>
+  <material name="vidro"><color rgba="0.06 0.09 0.14 1"/></material>
+  <material name="farol"><color rgba="1.0 0.95 0.75 1"/></material>
+  <material name="farolim"><color rgba="0.85 0.05 0.05 1"/></material>
+  <material name="preto"><color rgba="0.03 0.03 0.03 1"/></material>
+  <material name="cinza"><color rgba="0.30 0.31 0.34 1"/></material>
+  <material name="jante"><color rgba="0.78 0.78 0.80 1"/></material>
+  <material name="branco"><color rgba="0.95 0.95 0.95 1"/></material>
 
-  <!-- referencia: centro do eixo traseiro (sem massa, para o KDL nao se queixar) -->
+  <!-- Detalhes so visuais (sem colisao nem massa) por cima da mesh do CAD, que e um bloco simples.
+       Coordenadas em relacao ao base_link (eixo traseiro); perfil da mesh nesse referencial:
+       traseira x = -0.120 (z 0..0.051), rampa ate ao tejadilho x = 0.130..0.280 (z 0.118),
+       para-brisas ate x = 0.330 (z 0.071), capot ate a frente x = 0.448; lados y = -0.076/+0.097
+       a altura das janelas. -->
+  <xacro:macro name="detalhe_caixa" params="x y z sx sy sz mat pitch:=0">
+    <visual>
+      <origin xyz="${x - cb_x} ${y} ${z - cb_z}" rpy="0 ${pitch} 0"/>
+      <geometry><box size="${sx} ${sy} ${sz}"/></geometry>
+      <material name="${mat}"/>
+    </visual>
+  </xacro:macro>
+  <xacro:macro name="detalhe_cilindro" params="x y z r h mat">
+    <visual>
+      <origin xyz="${x - cb_x} ${y} ${z - cb_z}"/>
+      <geometry><cylinder radius="${r}" length="${h}"/></geometry>
+      <material name="${mat}"/>
+    </visual>
+  </xacro:macro>
+  <xacro:property name="yc" value="0.0105"/>   <!-- centro da carrocaria em y -->
+
   <link name="base_link"/>
 
   <link name="chassis">
     <inertial>
       <mass value="${m_chassis}"/>
-      <inertia ixx="${m_chassis * (chassis_w**2 + chassis_h**2) / 12}" ixy="0" ixz="0"
-               iyy="${m_chassis * (chassis_l**2 + chassis_h**2) / 12}" iyz="0"
-               izz="${m_chassis * (chassis_l**2 + chassis_w**2) / 12}"/>
+      <inertia ixx="${m_chassis * (cb_w**2 + cb_h**2) / 12}" ixy="0" ixz="0"
+               iyy="${m_chassis * (cb_l**2 + cb_h**2) / 12}" iyz="0"
+               izz="${m_chassis * (cb_l**2 + cb_w**2) / 12}"/>
     </inertial>
     <visual>
-      <geometry><box size="${chassis_l} ${chassis_w} ${chassis_h}"/></geometry>
+      <!-- referencial da mesh: eixo traseiro em (120, 17.75, ~0) mm -->
+      <origin xyz="${-0.120 - cb_x} -0.01775 ${0.001 - cb_z}"/>
+      <geometry><mesh filename="${meshes}/carro_base.stl" scale="0.001 0.001 0.001"/></geometry>
       <material name="carrocaria"/>
     </visual>
-    <!-- marca na frente, para se ver a orientacao -->
-    <visual>
-      <origin xyz="${chassis_l / 2 - 0.03} 0 ${chassis_h / 2 + 0.01}"/>
-      <geometry><box size="0.06 ${chassis_w} 0.02"/></geometry>
-      <material name="frente"/>
-    </visual>
+    <!-- vidros: para-brisas, oculo traseiro (na rampa) e janelas laterais -->
+    <xacro:detalhe_caixa x="0.3064" y="${yc}" z="0.0960" sx="0.068" sy="0.160" sz="0.003" mat="vidro" pitch="0.7545"/>
+    <xacro:detalhe_caixa x="0.0775" y="${yc}" z="0.1060" sx="0.098" sy="0.150" sz="0.003" mat="vidro" pitch="-0.2618"/>
+    <xacro:detalhe_caixa x="0.2025" y="0.0990" z="0.0985" sx="0.130" sy="0.003" sz="0.025" mat="vidro"/>
+    <xacro:detalhe_caixa x="0.2025" y="-0.0780" z="0.0985" sx="0.130" sy="0.003" sz="0.025" mat="vidro"/>
+    <!-- retrovisores -->
+    <xacro:detalhe_caixa x="0.2850" y="0.1050" z="0.0950" sx="0.012" sy="0.018" sz="0.012" mat="preto"/>
+    <xacro:detalhe_caixa x="0.2850" y="-0.0840" z="0.0950" sx="0.012" sy="0.018" sz="0.012" mat="preto"/>
+    <!-- farois a frente e farolins atras -->
+    <xacro:detalhe_caixa x="0.4495" y="${yc + 0.055}" z="0.050" sx="0.003" sy="0.030" sz="0.014" mat="farol"/>
+    <xacro:detalhe_caixa x="0.4495" y="${yc - 0.055}" z="0.050" sx="0.003" sy="0.030" sz="0.014" mat="farol"/>
+    <xacro:detalhe_caixa x="-0.1215" y="${yc + 0.060}" z="0.036" sx="0.003" sy="0.030" sz="0.012" mat="farolim"/>
+    <xacro:detalhe_caixa x="-0.1215" y="${yc - 0.060}" z="0.036" sx="0.003" sy="0.030" sz="0.012" mat="farolim"/>
+    <!-- para-choques da frente, faixa branca no capot -->
+    <xacro:detalhe_caixa x="0.4520" y="${yc}" z="0.010" sx="0.030" sy="0.180" sz="0.015" mat="preto"/>
+    <xacro:detalhe_caixa x="0.3890" y="${yc}" z="0.0720" sx="0.118" sy="0.025" sz="0.002" mat="branco"/>
+    <!-- aileron traseiro (asa + 2 suportes) -->
+    <xacro:detalhe_caixa x="-0.0950" y="${yc}" z="0.0980" sx="0.050" sy="0.200" sz="0.004" mat="preto" pitch="-0.12"/>
+    <xacro:detalhe_caixa x="-0.0950" y="${yc + 0.060}" z="0.0780" sx="0.008" sy="0.004" sz="0.040" mat="preto"/>
+    <xacro:detalhe_caixa x="-0.0950" y="${yc - 0.060}" z="0.0780" sx="0.008" sy="0.004" sz="0.040" mat="preto"/>
+    <!-- lidar no tejadilho (corpo, janela, tampa) -->
+    <xacro:detalhe_cilindro x="0.205" y="${yc}" z="0.1340" r="0.033" h="0.032" mat="cinza"/>
+    <xacro:detalhe_cilindro x="0.205" y="${yc}" z="0.1560" r="0.0325" h="0.012" mat="vidro"/>
+    <xacro:detalhe_cilindro x="0.205" y="${yc}" z="0.1650" r="0.034" h="0.006" mat="preto"/>
+    <!-- antena do recetor na rampa traseira -->
+    <xacro:detalhe_cilindro x="-0.050" y="-0.050" z="0.1300" r="0.0015" h="0.120" mat="preto"/>
+    <xacro:detalhe_cilindro x="-0.050" y="-0.050" z="0.1920" r="0.0040" h="0.006" mat="farolim"/>
     <collision>
-      <geometry><box size="${chassis_l} ${chassis_w} ${chassis_h}"/></geometry>
+      <geometry><box size="${cb_l} ${cb_w} ${cb_h}"/></geometry>
     </collision>
   </link>
   <joint name="chassis_joint" type="fixed">
     <parent link="base_link"/>
     <child link="chassis"/>
-    <origin xyz="${L / 2} 0 0.03"/>
+    <origin xyz="${cb_x} 0 ${cb_z}"/>
   </joint>
 
-  <!-- roda: visual cilindro, colisao esfera (rola sem os problemas de contacto cilindro-plano) -->
+  <xacro:macro name="jante" params="sy">
+    <visual>
+      <origin xyz="0 ${sy * 0.0225} 0" rpy="${pi / 2} 0 0"/>
+      <geometry><cylinder radius="0.032" length="0.002"/></geometry>
+      <material name="jante"/>
+    </visual>
+    <visual>
+      <origin xyz="0 ${sy * 0.0240} 0" rpy="${pi / 2} 0 0"/>
+      <geometry><cylinder radius="0.009" length="0.003"/></geometry>
+      <material name="cinza"/>
+    </visual>
+  </xacro:macro>
+
   <xacro:macro name="wheel" params="name">
     <link name="${name}">
       <inertial>
@@ -82,10 +149,14 @@
                  iyy="${0.4 * m_wheel * r * r}" iyz="0" izz="${0.4 * m_wheel * r * r}"/>
       </inertial>
       <visual>
-        <origin rpy="${pi / 2} 0 0"/>
-        <geometry><cylinder radius="${r}" length="0.04"/></geometry>
+        <!-- a mesh da roda tem o eixo em z (0..43 mm): roda -90 graus em x e centra -->
+        <origin xyz="0 -0.0215 0" rpy="${-pi / 2} 0 0"/>
+        <geometry><mesh filename="${meshes}/roda.stl" scale="0.001 0.001 0.001"/></geometry>
         <material name="pneu"/>
       </visual>
+      <!-- jantes nas duas faces da roda (a mesh tem 43 mm de largura, centrada) -->
+      <xacro:jante sy="1"/>
+      <xacro:jante sy="-1"/>
       <collision>
         <geometry><sphere radius="${r}"/></geometry>
       </collision>
@@ -96,7 +167,6 @@
     </gazebo>
   </xacro:macro>
 
-  <!-- rodas de tras (motrizes) -->
   <xacro:macro name="rear_wheel" params="side y">
     <xacro:wheel name="rear_${side}_wheel"/>
     <joint name="rear_${side}_wheel_joint" type="continuous">
@@ -110,7 +180,6 @@
   <xacro:rear_wheel side="left" y="${W / 2}"/>
   <xacro:rear_wheel side="right" y="${-W / 2}"/>
 
-  <!-- rodas da frente: manga de eixo (direcao) + roda livre -->
   <xacro:macro name="front_wheel" params="side y">
     <link name="front_${side}_knuckle">
       <inertial>
@@ -136,7 +205,6 @@
   <xacro:front_wheel side="right" y="${-W / 2}"/>
 
   <gazebo>
-    <!-- servo: vai para o angulo pedido a no maximo servo_rate rad/s -->
     <plugin filename="ignition-gazebo-joint-position-controller-system"
             name="ignition::gazebo::systems::JointPositionController">
       <joint_name>front_left_steering_joint</joint_name>
@@ -159,7 +227,6 @@
       <cmd_max>$(arg servo_rate)</cmd_max>
       <cmd_min>-$(arg servo_rate)</cmd_min>
     </plugin>
-    <!-- motor: velocidade angular imposta as rodas de tras -->
     <plugin filename="ignition-gazebo-joint-controller-system"
             name="ignition::gazebo::systems::JointController">
       <joint_name>rear_left_wheel_joint</joint_name>
@@ -172,7 +239,6 @@
       <topic>$(arg cmd_prefix)/wheel_rear_right</topic>
       <initial_velocity>0.0</initial_velocity>
     </plugin>
-    <!-- "EKF perfeito": pose do modelo no mundo (frame map) -->
     <plugin filename="ignition-gazebo-odometry-publisher-system"
             name="ignition::gazebo::systems::OdometryPublisher">
       <odom_frame>map</odom_frame>
@@ -181,10 +247,6 @@
       <tf_topic>$(arg gz_prefix)/tf</tf_topic>
       <odom_publish_frequency>50</odom_publish_frequency>
       <dimensions>2</dimensions>
-    </plugin>
-    <plugin filename="ignition-gazebo-joint-state-publisher-system"
-            name="ignition::gazebo::systems::JointStatePublisher">
-      <topic>$(arg gz_prefix)/joint_states</topic>
     </plugin>
   </gazebo>
 </robot>

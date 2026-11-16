@@ -21,11 +21,8 @@
   gz_type_name: ignition.msgs.Pose_V
   direction: GZ_TO_ROS
 
-- ros_topic_name: /joint_states
-  gz_topic_name: /ca_car/joint_states
-  ros_type_name: sensor_msgs/msg/JointState
-  gz_type_name: ignition.msgs.Model
-  direction: GZ_TO_ROS
+# /joint_states vem do ca_sim/vesc_to_gz a 50 Hz (o JointStatePublisher do Gazebo publicava a
+# 1 kHz -> o robot_state_publisher enchia o /tf e o RViz ficava atrasado/parado no URDF)
 
 # comandos das juntas (publicados pelo ca_sim/vesc_to_gz)
 - ros_topic_name: /ca_car/cmd/steer_left

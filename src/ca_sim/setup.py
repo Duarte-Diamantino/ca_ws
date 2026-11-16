@@ -28,6 +28,8 @@ setup(
             'tracking_monitor = ca_sim.tracking_monitor:main',
             'vesc_to_gz = ca_sim.vesc_to_gz:main',
             'gz_spawner = ca_sim.gz_spawner:main',
+            'drive = ca_sim.drive:main',
+            'map_relay = ca_sim.map_relay:main',
         ],
     },
 )

@@ -24,6 +24,13 @@ from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+# O Gazebo (ign-transport) so por 127.0.0.1. Por defeito anuncia-se em todas as interfaces de rede
+# (Wi-Fi, Tailscale/VPN, ...); se a rede do Windows muda com a simulacao aberta (o WSL segue-a, ex.
+# o PC adormece ou troca de Wi-Fi), a descoberta parte-se ("Exception sending a multicast message:
+# Network is unreachable") e a ponte deixa de receber a odometria do carro: o MPC fica parado.
+# Quem fala com este Gazebo (ca_sim/drive, "ign topic" a mao) tem de usar o mesmo IGN_IP.
+os.environ.setdefault('IGN_IP', '127.0.0.1')
+
 OBSTACLE_SDF = """
     <model name="obstaculo_{i}">
       <static>true</static>
@@ -56,8 +63,10 @@ def build_world(world_file, obstacles, radius, height=0.3):
                             half_h=height / 2.0)
         for i in range(0, len(obstacles), 2))
     sdf = sdf.replace('<!-- OBSTACULOS -->', models)
-    media = os.path.join(os.path.dirname(os.path.abspath(world_file)), 'media')
-    sdf = sdf.replace('>media/', '>' + media + '/')
+    # caminhos relativos -> absolutos (o mundo e copiado para /tmp)
+    worlds = os.path.dirname(os.path.abspath(world_file))
+    sdf = sdf.replace('>media/', '>' + os.path.join(worlds, 'media') + '/')
+    sdf = sdf.replace('<uri>meshes/', '<uri>' + os.path.join(os.path.dirname(worlds), 'meshes') + '/')
     fd, path = tempfile.mkstemp(prefix='ca_gazebo_', suffix='.sdf')
     with os.fdopen(fd, 'w') as f:
         f.write(sdf)
@@ -91,9 +100,10 @@ def _setup(context):
                         # fechar a janela do Gazebo termina o launch todo
                         on_exit=[EmitEvent(event=Shutdown(reason='o Gazebo terminou'))])
 
+    car = {n: cfg(n) for n in ('wheelbase', 'track', 'wheel_radius')}
     rsp = Node(package='robot_state_publisher', executable='robot_state_publisher',
                name='robot_state_publisher', output='log',
-               parameters=[{'robot_description': robot_description({'wheelbase': cfg('wheelbase')}),
+               parameters=[{'robot_description': robot_description(car),
                             'use_sim_time': use_sim_time}])
     bridge = Node(package='ros_gz_bridge', executable='parameter_bridge', name='ca_gz_bridge',
                   output='log',
@@ -104,7 +114,7 @@ def _setup(context):
         actions.append(Node(
             package='ros_gz_sim', executable='create', name='spawn_ca_car', output='log',
             arguments=['-world', 'pista', '-name', 'ca_car', '-topic', 'robot_description',
-                       '-x', cfg('x'), '-y', cfg('y'), '-z', '0.06', '-Y', cfg('yaw')]))
+                       '-x', cfg('x'), '-y', cfg('y'), '-z', '0.07', '-Y', cfg('yaw')]))
     return actions
 
 
@@ -121,7 +131,10 @@ def generate_launch_description():
         DeclareLaunchArgument('x', default_value='0.0'),
         DeclareLaunchArgument('y', default_value='0.0'),
         DeclareLaunchArgument('yaw', default_value='0.0'),
-        DeclareLaunchArgument('wheelbase', default_value='0.335'),
+        # geometria do carro (medida no CAD: ver urdf/ca_car.urdf.xacro)
+        DeclareLaunchArgument('wheelbase', default_value='0.324'),
+        DeclareLaunchArgument('track', default_value='0.1975'),
+        DeclareLaunchArgument('wheel_radius', default_value='0.0545'),
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         DeclareLaunchArgument('gz_verbosity', default_value='1'),
         OpaqueFunction(function=_setup),

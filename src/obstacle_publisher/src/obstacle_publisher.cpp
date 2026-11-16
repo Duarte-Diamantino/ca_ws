@@ -15,8 +15,11 @@ public:
     received_speed_(false), received_steer_(false)
   {
     // Parameters
-    this->declare_parameter<std::vector<double>>("positions", {});
-    this->declare_parameter<std::vector<double>>("goal", {});
+    // [ca_ws] era ("positions", {}): no Humble o "{}" escolhe o overload com ParameterDescriptor,
+    // o parametro fica sem valor e o no abortava (UninitializedStaticallyTypedParameterException)
+    // quando nao lhe passavam positions/goal.
+    this->declare_parameter<std::vector<double>>("positions", std::vector<double>{});
+    this->declare_parameter<std::vector<double>>("goal", std::vector<double>{});
 
     // Publishers
     pose_pub_   = create_publisher<geometry_msgs::msg::PoseArray>("/obstacles", 10);

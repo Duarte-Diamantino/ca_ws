@@ -30,15 +30,34 @@ def xyz(j):
     return [float(v) for v in j.find('origin').get('xyz').split()]
 
 
-@pytest.mark.parametrize('wheelbase', [0.335, 0.324])
+@pytest.mark.parametrize('wheelbase', [0.324, 0.335])
 def test_geometria_segue_os_argumentos(wheelbase):
-    root = urdf(wheelbase=wheelbase, track=0.25)
+    root = urdf(wheelbase=wheelbase, track=0.1975)
     fl = xyz(joint(root, 'front_left_steering_joint'))
     rl = xyz(joint(root, 'rear_left_wheel_joint'))
     rr = xyz(joint(root, 'rear_right_wheel_joint'))
     assert math.isclose(fl[0] - rl[0], wheelbase), 'distancia entre eixos errada'
-    assert math.isclose(rl[1] - rr[1], 0.25), 'bitola errada'
+    assert math.isclose(rl[1] - rr[1], 0.1975), 'bitola errada'
     assert rl[0] == 0.0 and rl[1] == -rr[1], 'base_link tem de estar no centro do eixo traseiro'
+
+
+def test_defeitos_sao_os_do_cad():
+    """Os defeitos do xacro tem de bater com ca_sim/vesc.py CAR (medidos no CAD)."""
+    root = urdf()
+    fl = xyz(joint(root, 'front_left_steering_joint'))
+    assert math.isclose(fl[0], 0.324) and math.isclose(2 * fl[1], 0.1975)
+    sph = root.find("link[@name='rear_left_wheel']/collision/geometry/sphere")
+    assert math.isclose(float(sph.get('radius')), 0.0545)
+
+
+def test_meshes_existem_e_estao_em_mm():
+    root = urdf()
+    meshes = [m for m in root.iter('mesh')]
+    assert len(meshes) == 5, 'carrocaria + 4 rodas'
+    for m in meshes:
+        path = m.get('filename').replace('file://', '')
+        assert os.path.isfile(path), path
+        assert m.get('scale') == '0.001 0.001 0.001', 'as STL do CAD estao em mm'
 
 
 def test_base_link_sem_massa_e_todas_as_outras_com():
@@ -68,6 +87,46 @@ def test_mundo_e_xml_valido_com_marcador_de_obstaculos():
     world = ET.fromstring(text).find('world')
     assert world.get('name') == 'pista', 'o launch e o gz_spawner assumem o mundo "pista"'
     assert os.path.isfile(os.path.join(SRC, 'worlds', 'media', 'pista.png'))
+    names = [m.get('name') for m in world.findall('model')]
+    assert 'armazem_paredes' in names
+    assert sum(n.startswith('cone_') for n in names) >= 10
+
+
+def test_cones_e_armazem_fora_da_estrada_e_do_caminho_q():
+    """Nada fisico (cones, pilares, estantes, paletes) pode estar a menos de 0.5 m do caminho Q."""
+    import sys
+    sys.path.insert(0, os.path.join(SRC, '..', 'pickup_description'))
+    try:
+        import rclpy
+        from pickup_description.q_path_publisher import QPathPublisher
+    except ImportError:
+        pytest.skip('pickup_description nao disponivel')
+    rclpy.init()
+    try:
+        q = QPathPublisher()
+        cap = {}
+        q.path_pub.publish = lambda m: cap.__setitem__('p', m)
+        q.marker_pub.publish = lambda m: None
+        q.on_timer()
+        path = [(p.pose.position.x, p.pose.position.y) for p in cap['p'].poses]
+        q.destroy_node()
+    finally:
+        rclpy.shutdown()
+    world = ET.parse(WORLD).getroot().find('world')
+    checked = 0
+    for m in world.findall('model'):
+        if m.get('name') in ('chao', 'mapa', 'faixas_chao') or m.get('name') == 'armazem_paredes':
+            continue
+        mp = m.find('pose')
+        base = [float(v) for v in mp.text.split()[:2]] if mp is not None else [0.0, 0.0]
+        for link in m.findall('link'):
+            lp = link.find('pose')
+            off = [float(v) for v in lp.text.split()[:2]] if lp is not None else [0.0, 0.0]
+            x, y = base[0] + off[0], base[1] + off[1]
+            d = min(math.hypot(x - px, y - py) for px, py in path)
+            assert d > 0.5, f'{m.get("name")}/{link.get("name")} a {d:.2f} m do caminho Q'
+            checked += 1
+    assert checked > 20
 
 
 def test_build_world_insere_obstaculos():
@@ -82,6 +141,8 @@ def test_build_world_insere_obstaculos():
         assert [m.find('pose').text.split()[:2] for m in obs] == [['1.0', '2.0'], ['3.5', '-1.0']]
         tex = root.find(".//albedo_map").text
         assert os.path.isabs(tex) and os.path.isfile(tex)
+        for uri in root.iter('uri'):
+            assert os.path.isabs(uri.text) and os.path.isfile(uri.text), uri.text
     finally:
         os.remove(path)
     with pytest.raises(RuntimeError):
@@ -103,7 +164,7 @@ def test_urdf_converte_para_sdf(tmp_path):
     assert 'front_left_steering_joint' in names and 'rear_right_wheel_joint' in names
     # o chassis (junta fixa) e fundido no base_link -> o base_link fica com a massa
     base = model.find("link[@name='base_link']")
-    assert float(base.find('inertial/mass').text) == pytest.approx(3.0)
+    assert float(base.find('inertial/mass').text) == pytest.approx(2.6)
     plugins = [p.get('name') for p in model.findall('plugin')]
     assert plugins.count('ignition::gazebo::systems::JointPositionController') == 2
     assert plugins.count('ignition::gazebo::systems::JointController') == 2

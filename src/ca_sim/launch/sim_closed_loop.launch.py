@@ -30,7 +30,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from ca_sim.vesc import PROFILES
+from ca_sim.vesc import CAR, PROFILES
 
 
 def _parse_list(text):
@@ -66,10 +66,12 @@ def _setup(context):
         ctrl = Node(package='mpc_python', executable='mpc_controller',
                     name='mpc_controller', output='log', parameters=[sim_time])
     else:
-        # goal_tol: o default do no (0.05 m) nunca e apanhado a ~3 m/s -> o carro da voltas
+        # parametros do simulador (dwa_follower/config/dwa.yaml: v_max, goal_tol, ...); dwa_goal_tol:=
+        # por cima
+        dwa_yaml = os.path.join(get_package_share_directory('dwa_follower'), 'config', 'dwa.yaml')
         ctrl = Node(package='dwa_follower', executable='dwa_global_follower',
                     name='dwa_global_follower', output='log',
-                    parameters=[{'goal_tol': float(cfg('dwa_goal_tol'))}, sim_time])
+                    parameters=[dwa_yaml, {'goal_tol': float(cfg('dwa_goal_tol'))}, sim_time])
     monitor = Node(package='ca_sim', executable='tracking_monitor', name='tracking_monitor',
                    output='screen',
                    parameters=[{'timeout_s': float(cfg('timeout')),
@@ -88,11 +90,11 @@ def _setup(context):
             PythonLaunchDescriptionSource(os.path.join(
                 get_package_share_directory('ca_gazebo'), 'launch', 'gazebo.launch.py')),
             launch_arguments={'gui': cfg('gui'), 'spawn': 'false',
-                              'obstacles': obstacles_txt,
-                              'wheelbase': str(profile['wheelbase']),
-                              'use_sim_time': 'true'}.items())
+                              'obstacles': obstacles_txt, 'use_sim_time': 'true',
+                              **{k: str(v) for k, v in CAR.items()}}.items())
+        # calibracao do controlador + geometria do carro (CAR sobrepoe o wheelbase do perfil)
         vesc = Node(package='ca_sim', executable='vesc_to_gz', name='vesc_to_gz', output='log',
-                    parameters=[profile, sim_time])
+                    parameters=[profile, CAR, sim_time])
         spawner = Node(package='ca_sim', executable='gz_spawner', name='gz_spawner',
                        output='screen')
 

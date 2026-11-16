@@ -3,10 +3,10 @@ bicicleta, sem ROS a correr: deterministico e independente do CPU.
 
 Precisa do workspace carregado (source install/setup.bash). Exemplos:
   python3 tools/mpc_offline.py ""                        # sem obstaculos
-  python3 tools/mpc_offline.py "7.5,2.0"                 # obstaculo 0.4 m por fora da curva grande
+  python3 tools/mpc_offline.py "8.1,2.16"                 # obstaculo 0.4 m por fora da curva grande
   python3 tools/mpc_offline.py "2.5,0.0" --verbose       # obstaculo em cima da reta, passo a passo
-  python3 tools/mpc_offline.py "7.5,2.0" --patch USE_REJOIN=1 --gate 8   # modo "contornar" antigo
-  python3 tools/mpc_offline.py "7.5,2.0" --patch W_OBSTACLE_SOFT=1e5     # mudar uma constante
+  python3 tools/mpc_offline.py "8.1,2.16" --patch USE_REJOIN=1 --gate 8   # modo "contornar" antigo
+  python3 tools/mpc_offline.py "8.1,2.16" --patch W_OBSTACLE_SOFT=1e5     # mudar uma constante
 Quando o MPC para por falta de trajetoria livre, mostra porque e que cada plano foi rejeitado.
 """
 import argparse
@@ -38,7 +38,13 @@ ap.add_argument('--refstep', type=int, default=0,
 a = ap.parse_args()
 for p in a.patch:
     k, v = p.split('=')
-    setattr(M, k, float(v))
+    old = getattr(M, k)
+    if isinstance(old, bool):
+        setattr(M, k, v.strip().lower() in ('1', 'true', 'yes', 'sim'))
+    elif isinstance(old, int):
+        setattr(M, k, int(float(v)))
+    else:
+        setattr(M, k, float(v))
 
 obs = [float(v) for v in a.obstacles.split(',') if v.strip()]
 obs = list(zip(obs[0::2], obs[1::2]))
@@ -91,7 +97,8 @@ orig_opt = c.run_optimization
 
 def opt_wrapped(H, wv, wg):
     ok, v, g, st = orig_opt(H, wv, wg)
-    ob = c.obstacles_relevant_for_points(c.get_local_reference_base(c.current_segment, H=M.H_SHORT)[0])
+    extra = c.obstacle_extra(M.PATH_FILTER_MARGIN) if hasattr(c, 'obstacle_extra') else M.PATH_FILTER_MARGIN
+    ob = c.obstacles_relevant_for_points(c.get_local_reference_base(c.current_segment, H=M.H_SHORT)[0], extra=extra)
     dmin = min((math.hypot(x - ox, y - oy) for x, y, _, _ in st for ox, oy in ob), default=float('inf'))
     dev = max(c.nearest_path_dist(x, y) for x, y, _, _ in st)
     opt_log.append(dict(H=H, ok=ok, dmin=dmin, dev=dev))

@@ -1,0 +1,20 @@
+# Parametros do DWA (dwa_follower/dwa_global_follower) para o SIMULADOR. O tools/sim.sh dwa e a GUI
+# (ca_gui) carregam este ficheiro e depois ~/ca_ws/dwa_params.yaml (se existir). No carro real, sem
+# este ficheiro, ficam os valores do codigo (v_max 3.0, obs_influence 1e9, use_marker_size false).
+# Com o DWA a correr: ros2 param set /dwa_global_follower v_max 1.5  (floats com ponto decimal)
+dwa_global_follower:
+  ros__parameters:
+    v_max: 1.2              # velocidade maxima [m/s] (codigo: 3.0; a 3 m/s o carro derrapa nas curvas da pista FNR)
+    goal_tol: 0.3           # distancia ao ultimo ponto para dar por terminado [m] (codigo: 0.05)
+    obs_influence: 1.0      # a recompensa da distancia aos obstaculos satura a 1 m (codigo: sem limite)
+    use_marker_size: true   # o raio do obstaculo vem do marker (a GUI manda-o); distancia minima = raio + car_half_width + obstacle_margin
+    car_half_width: 0.10
+    obstacle_margin: 0.10
+    search_ahead: 30        # pontos a frente onde procura o ponto mais proximo do caminho
+    window_pts: 15          # pontos do caminho no custo (codigo: 50 = 5 m a frente: cortava as curvas)
+    lookahead_dist: 1.2     # objetivo local a 1.2 m (codigo: 2.0; ~ v_max x horizonte de 1 s)
+    # Desvio do caminho a volta dos obstaculos (como o MPC; tambem ligado no codigo):
+    use_ref_shift: true     # false = segue o caminho original e so ve os obstaculos no horizonte de 1 s
+    avoid_margin: 0.10      # o caminho desviado passa a (distancia minima + isto) do obstaculo
+    avoid_ramp: 2.0         # m de caminho para entrar/sair do desvio
+    avoid_default_side: 1.0 # obstaculo mesmo em cima do caminho e espaco igual dos dois lados: +1 esquerda, -1 direita
