@@ -1,5 +1,6 @@
 import math
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from visualization_msgs.msg import Marker
 from nav_msgs.msg import Path
@@ -141,9 +142,16 @@ class QPathPublisher(Node):
 def main():
     rclpy.init()
     node = QPathPublisher()
-    rclpy.spin(node)
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):  # [ca_ws] Ctrl+C no launch: sem traceback
+        pass
+    except Exception:
+        if rclpy.ok():  # erro a serio; com o ROS ja a fechar e so o Ctrl+C a meio do spin
+            raise
     node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

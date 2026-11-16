@@ -13,6 +13,7 @@ import math
 import sys
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import PoseArray
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
@@ -181,7 +182,7 @@ def main(args=None):
         rclpy.spin(node)
     except SystemExit as e:
         code = int(e.code)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # [ca_ws] Ctrl+C no launch
         code = 1
     finally:
         node.destroy_node()

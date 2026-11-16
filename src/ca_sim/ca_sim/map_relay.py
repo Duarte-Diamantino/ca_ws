@@ -10,6 +10,7 @@ depois de um Reset o mapa volta em <= period_s.
   ros2 run ca_sim map_relay --ros-args -p period_s:=2.0
 """
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -45,8 +46,11 @@ def main(args=None):
     node = MapRelay()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # [ca_ws] Ctrl+C no launch
         pass
+    except Exception:
+        if rclpy.ok():  # erro a serio; com o ROS ja a fechar e so o Ctrl+C a meio do spin
+            raise
     finally:
         node.destroy_node()
         if rclpy.ok():

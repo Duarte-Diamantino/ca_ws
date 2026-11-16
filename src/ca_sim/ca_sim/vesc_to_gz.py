@@ -15,6 +15,7 @@ com a mesma velocidade maxima do servo do Gazebo (servo_rate) e rodas a girar co
 import math
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -144,8 +145,11 @@ def main(args=None):
     node = VescToGz()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # [ca_ws] Ctrl+C no launch
         pass
+    except Exception:
+        if rclpy.ok():  # erro a serio; com o ROS ja a fechar e so o Ctrl+C a meio do spin
+            raise
     finally:
         node.destroy_node()
         if rclpy.ok():

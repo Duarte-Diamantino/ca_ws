@@ -17,6 +17,7 @@ parametrizavel, porque o MPC e o DWA da TESE assumem calibracoes diferentes.
 import math
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
@@ -154,8 +155,11 @@ def main(args=None):
     node = KinematicSim()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # [ca_ws] Ctrl+C no launch
         pass
+    except Exception:
+        if rclpy.ok():  # erro a serio; com o ROS ja a fechar e so o Ctrl+C a meio do spin
+            raise
     finally:
         node.destroy_node()
         if rclpy.ok():

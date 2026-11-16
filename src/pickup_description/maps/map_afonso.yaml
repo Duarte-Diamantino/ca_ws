@@ -1,0 +1,11 @@
+# Mapa da pista FNR do Afonso Oliveira para a localizacao global (AMCL) no carro real.
+# A imagem map.pgm e a maps/map.png do pacote point_cloud_processor (olivas-afonso/fnr_thesis), igual
+# pixel a pixel; estes valores sao os do maps/map.yaml dele. Esta rodado -90 graus (yaw da origem): o
+# map_server ignora o yaw; no point_cloud_processor o map_transformer/map_republisher tratam disso.
+#   ros2 launch pickup_description map_only.launch.py map_file:=map_afonso.yaml
+image: map.pgm
+resolution: 0.026
+origin: [-1.55, 5.15, -1.5708]
+occupied_thresh: 0.5
+free_thresh: 0.5
+negate: 0

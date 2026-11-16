@@ -2,6 +2,8 @@
 import os
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import ComposableNodeContainer
 from launch_ros.descriptions import ComposableNode
 from launch_ros.actions import Node
@@ -9,7 +11,8 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('pickup_description')
-    map_yaml = os.path.join(pkg_share, 'maps', 'map.yaml')
+    # [ca_ws] map_file:= escolhe (nao 'map': o gazebo_sim.launch.py inclui este launch com map:=true) o mapa desta pasta (ver maps/README.md); por defeito o map.yaml de sempre
+    map_yaml = PathJoinSubstitution([pkg_share, 'maps', LaunchConfiguration('map_file')])
 
     # 1Container isolado para componentes
     container = ComposableNodeContainer(
@@ -46,6 +49,8 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument('map_file', default_value='map.yaml',
+                              description='ficheiro .yaml em pickup_description/maps (ex.: map_afonso.yaml)'),
         container,
         lifecycle_manager,
     ])
