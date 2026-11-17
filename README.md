@@ -43,9 +43,9 @@ ca_ws/
 
 | Pacote (`src/`) | O que é | Origem |
 |---|---|---|
-| [`ca_gui`](src/ca_gui) | GUI da simulação (Qt): mapa à escala real, caminhos pela estrada, obstáculos no Gazebo, conduzir (MPC/DWA/teclado), afinar o MPC | novo |
+| [`ca_gui`](src/ca_gui) | GUI da simulação (Qt): mapa à escala real, caminhos pela estrada, obstáculos no Gazebo, conduzir e afinar MPC/DWA, teclado | novo |
 | [`ca_sim`](src/ca_sim) | Carro simulado (cinemático ou Gazebo), ponte VESC→Gazebo, terminais de condução, monitor PASS/FAIL, launches | novo |
-| [`ca_gazebo`](src/ca_gazebo) | Carro 1/10 para o Gazebo Fortress (URDF com o CAD, rodas, servo), mundo com a pista, bridge | novo |
+| [`ca_gazebo`](src/ca_gazebo) | Carro 1/10 para o Gazebo Fortress (modelo URDF/Xacro único com CAD, rodas e servo), mundo com a pista, bridge | novo |
 | [`mpc_python`](src/mpc_python) | MPC (scipy L-BFGS-B, modelo bicicleta): segue `/reference_path` e contorna `/obstacles` | TESE |
 | [`dwa_follower`](src/dwa_follower) | DWA (C++): `dwa_global_follower` segue `/reference_path` e contorna os obstáculos | TESE |
 | [`obstacle_publisher`](src/obstacle_publisher) | Obstáculos fixos (`positions:=[x1,y1,...]`) | TESE |
@@ -53,7 +53,6 @@ ca_ws/
 | [`spline_visualizer`](src/spline_visualizer) | Desenha uma parábola no RViz | TESE |
 | [`gui_pista`](src/gui_pista) | GUI antiga (Tkinter): imagem da pista → Hybrid A\* + DWA + MPC + linha de corrida | GUI_pista |
 | [`point_cloud_processor`](src/point_cloud_processor) | **Afonso Oliveira.** Carro real: mapa da pista + AMCL (localização global), EKF, localização pelas linhas (ZED), mapas a partir da nuvem de pontos, deteção de sinais | fnr_thesis |
-| [`carro_com_rodas_mov_urdf`](src/carro_com_rodas_mov_urdf) | URDF do carro a partir do CAD | ca_sim_ros2 |
 | [`led_controller`](src/led_controller) | LEDs do carro conforme o sinal de trânsito detetado (`/signal`) | ca_sim_ros2 |
 
 ## Documentação
@@ -75,7 +74,7 @@ ca_ws/
 | [Duarte-Diamantino/TESE](https://github.com/Duarte-Diamantino/TESE) | `653131a` | `src/mpc_python`, `dwa_follower`, `obstacle_publisher`, `pickup_description`, `spline_visualizer`; `tools/manual_control.py` |
 | [Duarte-Diamantino/GUI_pista](https://github.com/Duarte-Diamantino/GUI_pista) | `d61a0cd` | `src/gui_pista` |
 | [Duarte-Diamantino/CA_SIM](https://github.com/Duarte-Diamantino/CA_SIM) | `ecbc295` | notas em `docs/`, código antigo em `extras/CA_SIM`, medidas do carro para o `ca_gazebo` |
-| [Duarte-Diamantino/ca_sim_ros2](https://github.com/Duarte-Diamantino/ca_sim_ros2) | `c29202d` | `src/carro_com_rodas_mov_urdf`, `src/led_controller`; meshes do CAD no `ca_gazebo` |
+| [Duarte-Diamantino/ca_sim_ros2](https://github.com/Duarte-Diamantino/ca_sim_ros2) | `c29202d` | `src/led_controller`; meshes do CAD integradas no modelo único do `ca_gazebo` |
 | [Duarte-Diamantino/semaforo_CA_FNR](https://github.com/Duarte-Diamantino/semaforo_CA_FNR) | `95a5bab` | `extras/semaforo_CA_FNR` |
 | [olivas-afonso/fnr_thesis](https://github.com/olivas-afonso/fnr_thesis) (Afonso Oliveira) | `e0570de` | `src/point_cloud_processor` (sem os pesos `.onnx`, 231 MB) |
 

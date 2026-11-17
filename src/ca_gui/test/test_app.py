@@ -43,6 +43,20 @@ def test_tabela_do_mpc(win):
     assert 'V_MAX' in win.mpc_rows and win.mpc_current()['V_MAX'] > 0
 
 
+def test_tabela_do_dwa(win):
+    values = win.dwa_current()
+    assert 'v_max' in win.dwa_rows
+    assert values['v_max'] == pytest.approx(1.2)       # src/dwa_follower/config/dwa.yaml
+    assert values['use_marker_size'] is True
+
+
+def test_sair_do_separador_obstaculos_desliga_o_modo(win):
+    win.on_tab(1)
+    assert win.view.mode == 'obstaculos'
+    win.on_tab(3)                                      # DWA (afinar)
+    assert win.view.mode == 'pontos'
+
+
 def test_anel_tracejado_desligado_por_defeito(win):
     win.set_obstacles([(2.7, 0.0, 0.15)])
     assert len(win.view.obstacle_items) == 1          # so o cilindro

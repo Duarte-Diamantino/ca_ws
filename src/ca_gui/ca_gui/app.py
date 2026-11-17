@@ -6,7 +6,7 @@
 
 Mapa a escala real com o carro do Gazebo em tempo real. Clicas pontos na pista e o caminho e
 calculado pela estrada (nao corta por cima das linhas), ou desenhas a mao; pes obstaculos (aparecem
-no Gazebo e o MPC/DWA veem-nos); arrancas o MPC/DWA ou conduzes com o teclado; afinas o MPC.
+no Gazebo e o MPC/DWA veem-nos); arrancas o MPC/DWA ou conduzes com o teclado; afinas ambos.
 """
 import argparse
 import math
@@ -19,17 +19,54 @@ from ament_index_python.packages import get_package_share_directory
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QFont, QKeySequence, QPalette
 from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox,
-                             QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
+                             QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox,
                              QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox,
                              QPlainTextEdit, QPushButton, QShortcut, QSplitter, QTableWidget,
                              QTableWidgetItem, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
-from ca_gui.ros_io import RosBridge, mpc_param_files, read_param_files, write_user_params, USER_MPC_PARAMS
+from ca_gui.ros_io import (RosBridge, dwa_param_files, mpc_param_files, read_param_files,
+                           write_user_params, USER_DWA_PARAMS, USER_MPC_PARAMS)
 from ca_gui.track import Track, path_stats, q_path
 from ca_gui.view import MapView
 
 K_CAR = 1.24          # 1/m, curvatura maxima do carro com a calibracao do MPC (22.5 graus, L 0.335)
 TRAIL_S = 20.0
+
+# Nome, explicacao, minimo, maximo, valor por defeito no codigo C++. O ficheiro dwa.yaml sobrepoe
+# estes valores na simulacao; os limites sao tambem usados para validar a edicao na GUI.
+DWA_TUNABLE = [
+    ('v_max', 'velocidade maxima amostrada [m/s]', 0.1, 3.0, 3.0),
+    ('goal_tol', 'distancia ao ultimo ponto para terminar [m]', 0.01, 10.0, 0.05),
+    ('horizon_s', 'horizonte de simulacao de cada trajetoria [s]', 0.1, 10.0, 1.0),
+    ('lookahead_dist', 'distancia do objetivo local a frente no caminho [m]', 0.1, 10.0, 2.0),
+    ('window_pts', 'numero de pontos do caminho usados no custo', 1, 1000, 50),
+    ('search_ahead', 'pontos a frente onde procura o progresso no caminho', 1, 10000, 30),
+    ('first_level_samples', 'amostras de velocidade/direcao no primeiro nivel', 1, 6, 6),
+    ('second_level_samples', 'amostras no refinamento da melhor trajetoria', 2, 100, 7),
+    ('w_path', 'peso da distancia ao caminho', 0.0, 1000.0, 2.0),
+    ('w_vel', 'peso/recompensa da velocidade', 0.0, 1000.0, 0.5),
+    ('w_goal', 'peso da distancia ao objetivo local', 0.0, 1000.0, 2.0),
+    ('w_obs', 'peso da distancia aos obstaculos', 0.0, 1000000.0, 1.0),
+    ('w_gamma', 'peso da mudanca de direcao', 0.0, 1000.0, 0.5),
+    ('w_index', 'peso que favorece pontos mais proximos no caminho', 0.0, 1000.0, 3.0),
+    ('w_pose_snap', 'peso para regressar rapidamente ao caminho', 0.0, 1000.0, 3.0),
+    ('obs_influence', 'distancia onde a recompensa dos obstaculos satura [m]', 0.01, 1.0e9, 1.0e9),
+    ('min_safe_distance', 'distancia minima sem usar o tamanho do marker [m]', 0.0, 10.0, 0.5),
+    ('use_marker_size', 'usar o raio publicado para cada obstaculo', None, None, False),
+    ('car_half_width', 'meia largura do carro na distancia de seguranca [m]', 0.01, 2.0, 0.10),
+    ('obstacle_margin', 'folga extra aos obstaculos [m]', 0.0, 5.0, 0.10),
+    ('require_two_hits', 'exigir que a trajetoria passe por pontos consecutivos', None, None, True),
+    ('required_hits', 'numero de pontos consecutivos exigidos', 1, 50, 2),
+    ('path_hit_radius', 'raio para considerar um ponto do caminho atingido [m]', 0.01, 5.0, 0.18),
+    ('relax_if_none', 'aliviar a regra dos pontos se nenhuma trajetoria servir', None, None, True),
+    ('prefer_pose_on_path', 'preferir trajetorias que passam perto da pose atual', None, None, True),
+    ('pose_hit_radius', 'raio da preferencia pela pose atual [m]', 0.01, 5.0, 0.18),
+    ('use_ref_shift', 'desviar o caminho de referencia dos obstaculos', None, None, True),
+    ('avoid_margin', 'folga adicional do caminho desviado [m]', 0.0, 5.0, 0.10),
+    ('avoid_ramp', 'comprimento para entrar e sair do desvio [m]', 0.05, 20.0, 2.0),
+    ('avoid_default_side', 'lado no empate: +1 esquerda, -1 direita', -1.0, 1.0, 1.0),
+    ('avoid_center_tol', 'tolerancia para obstaculo centrado no caminho [m]', 0.0, 1.0, 0.05),
+]
 STYLE = """
 QWidget { font-size: 10pt; }
 QGroupBox { border: 1px solid #3f4451; border-radius: 6px; margin-top: 14px; padding: 8px 6px 6px 6px; }
@@ -114,7 +151,8 @@ class MainWindow(QMainWindow):
         self.kb_timer.start(50)
         self.set_mode('pontos')
         self.redraw_obstacles()
-        self.mpc_load_table()
+        self.param_load_table('mpc')
+        self.param_load_table('dwa')
         self.log('Clica na pista para pores pontos: o caminho segue a estrada. Depois "Publicar caminho".')
 
     @staticmethod
@@ -170,6 +208,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._path_tab(), 'Caminho')
         tabs.addTab(self._obstacles_tab(), 'Obstaculos')
         tabs.addTab(self._mpc_tab(), 'MPC (afinar)')
+        tabs.addTab(self._dwa_tab(), 'DWA (afinar)')
         tabs.currentChanged.connect(self.on_tab)
         self.tabs = tabs
         rv.addWidget(tabs, 1)
@@ -197,7 +236,7 @@ class MainWindow(QMainWindow):
         for b in (self.btn_mpc, self.btn_dwa, self.btn_kb):
             b.setCheckable(True)
         self.btn_mpc.setToolTip('arranca/para o mpc_controller (com os parametros do separador MPC)')
-        self.btn_dwa.setToolTip('arranca/para o dwa_global_follower')
+        self.btn_dwa.setToolTip('arranca/para o dwa_global_follower (com os parametros do separador DWA)')
         self.btn_kb.setToolTip('W/S ou setas: acelerar/travar; A/D: virar. Podes carregar duas ao mesmo '
                                'tempo. Ao largar, desce ate 0 e a direcao centra. O mapa tem de estar selecionado.')
         self.btn_mpc.clicked.connect(lambda on: self.toggle_controller('mpc', on))
@@ -271,9 +310,8 @@ class MainWindow(QMainWindow):
         h.addWidget(all_r)
         h.addStretch(1)
         v.addLayout(h)
-        how = QLabel('O MPC usa o tamanho de cada obstaculo: mantem o centro do carro a '
-                     'raio + meia largura do carro (CAR_HALF_WIDTH) + folga (OBSTACLE_MARGIN). '
-                     'A folga e a meia largura mudam-se no separador MPC (afinar).')
+        how = QLabel('O MPC e o DWA usam o tamanho de cada obstaculo mais a meia largura do carro '
+                     'e uma folga. Estes valores mudam-se nos respetivos separadores de afinacao.')
         how.setWordWrap(True)
         how.setObjectName('hint')
         v.addWidget(how)
@@ -289,33 +327,48 @@ class MainWindow(QMainWindow):
         v.addStretch(1)
         return w
 
-    def _mpc_tab(self):
+    def _controller_param_tab(self, kind):
+        label = kind.upper()
+        user_file = USER_MPC_PARAMS if kind == 'mpc' else USER_DWA_PARAMS
+        base_file = 'mpc_python/config/mpc.yaml' if kind == 'mpc' else 'dwa_follower/config/dwa.yaml'
         w = QWidget()
         v = QVBoxLayout(w)
-        self.mpc_src_lbl = QLabel('')
-        self.mpc_src_lbl.setWordWrap(True)
-        self.mpc_src_lbl.setObjectName('hint')
-        v.addWidget(self.mpc_src_lbl)
-        self.mpc_table = QTableWidget(0, 2)
-        self.mpc_table.setHorizontalHeaderLabels(['parametro', 'valor'])
-        self.mpc_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.mpc_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.mpc_table.verticalHeader().setVisible(False)
-        self.mpc_table.setSelectionMode(QAbstractItemView.NoSelection)
-        self.mpc_table.itemChanged.connect(self.on_mpc_edit)
-        v.addWidget(self.mpc_table, 1)
+        src_lbl = QLabel('')
+        src_lbl.setWordWrap(True)
+        src_lbl.setObjectName('hint')
+        setattr(self, f'{kind}_src_lbl', src_lbl)
+        v.addWidget(src_lbl)
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(['parametro', 'valor'])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.itemChanged.connect(lambda item, k=kind: self.on_param_edit(k, item))
+        setattr(self, f'{kind}_table', table)
+        v.addWidget(table, 1)
         g = QGridLayout()
         for i, (text, fn, tip) in enumerate((
-                ('Aplicar', self.mpc_apply, 'com o MPC a correr: muda ja (no proximo ciclo)'),
-                ('Ler do MPC', self.mpc_load_table, 'le os valores do MPC a correr (ou dos ficheiros)'),
-                ('Guardar (os meus)', self.mpc_save, f'grava em {USER_MPC_PARAMS}: usados sempre que o MPC arranca'),
-                ('Repor os de origem', self.mpc_reset, 'apaga os teus e volta aos de mpc_python/config/mpc.yaml'))):
+                ('Aplicar', lambda _checked=False, k=kind: self.param_apply(k),
+                 f'com o {label} a correr: muda ja (no proximo ciclo)'),
+                (f'Ler do {label}', lambda _checked=False, k=kind: self.param_load_table(k),
+                 f'le os valores do {label} a correr (ou dos ficheiros)'),
+                ('Guardar (os meus)', lambda _checked=False, k=kind: self.param_save(k),
+                 f'grava em {user_file}: usados sempre que o {label} arranca'),
+                ('Repor os de origem', lambda _checked=False, k=kind: self.param_reset(k),
+                 f'apaga os teus e volta a {base_file}'))):
             b = QPushButton(text)
             b.setToolTip(tip)
             b.clicked.connect(fn)
             g.addWidget(b, i // 2, i % 2)
         v.addLayout(g)
         return w
+
+    def _mpc_tab(self):
+        return self._controller_param_tab('mpc')
+
+    def _dwa_tab(self):
+        return self._controller_param_tab('dwa')
 
     def log(self, text):
         self.log_box.appendPlainText(time.strftime('%H:%M:%S ') + text)
@@ -374,7 +427,7 @@ class MainWindow(QMainWindow):
     def on_tab(self, i):
         if i == 1:
             self.set_mode('obstaculos')
-        elif i == 0 and self.view.mode == 'obstaculos':
+        elif self.view.mode == 'obstaculos':
             self.set_mode('pontos')
 
     def on_click(self, x, y, button):
@@ -612,7 +665,8 @@ class MainWindow(QMainWindow):
         if w and not s:
             self.kb_v = min(rc.V_MAX, self.kb_v + rc.ACCEL * dt)
         elif s and not w:
-            self.kb_v = max(0.0, self.kb_v - rc.BRAKE * dt) if self.kb_v > 0 else max(rc.V_MIN, self.kb_v - rc.REVERSE_ACCEL * dt)
+            self.kb_v = (max(0.0, self.kb_v - rc.BRAKE * dt) if self.kb_v > 0
+                         else max(rc.V_MIN, self.kb_v - rc.REVERSE_ACCEL * dt))
         else:
             self.kb_v = math.copysign(max(0.0, abs(self.kb_v) - rc.COAST * dt), self.kb_v)
         target = self.calib.steer_max * ((1.0 if a else 0.0) - (1.0 if d else 0.0))
@@ -675,21 +729,30 @@ class MainWindow(QMainWindow):
         self.drive_lbl.setText(f'a conduzir: {names.get(who, who)}' if active and who else 'ninguem a conduzir')
         self.status_lbl.setText(car + '   |   ' + cmd)
 
-    # ================================================================== MPC
+    # ================================================================== parametros MPC / DWA
     def mpc_spec(self):
         if not hasattr(self, '_tunable'):
             from mpc_python import mpc_controller as M
             self._tunable = [(n, d, lo, hi, getattr(M, n)) for n, d, lo, hi, _ in M.TUNABLE]
         return self._tunable
 
-    def mpc_current(self):
+    def param_spec(self, kind):
+        return self.mpc_spec() if kind == 'mpc' else DWA_TUNABLE
+
+    def param_current(self, kind):
         out = {}
-        for n, item in getattr(self, 'mpc_rows', {}).items():
-            out[n] = self._parse(n, item)
+        for n, item in getattr(self, f'{kind}_rows', {}).items():
+            out[n] = self._parse(kind, n, item)
         return out
 
-    def _parse(self, name, item):
-        spec = {n: (lo, hi, default) for n, _, lo, hi, default in self.mpc_spec()}[name]
+    def mpc_current(self):
+        return self.param_current('mpc')
+
+    def dwa_current(self):
+        return self.param_current('dwa')
+
+    def _parse(self, kind, name, item):
+        spec = {n: (lo, hi, default) for n, _, lo, hi, default in self.param_spec(kind)}[name]
         lo, hi, default = spec
         if isinstance(default, bool):
             return item.checkState() == Qt.Checked
@@ -699,28 +762,34 @@ class MainWindow(QMainWindow):
             raise ValueError(f'{name} tem de estar entre {lo} e {hi}')
         return val
 
-    def mpc_load_table(self):
-        names = [n for n, *_ in self.mpc_spec()]
-        live = self.ros.mpc_get_params(names) if (self.ros and self.ros.mpc_get.service_is_ready()) else None
-        if live:
-            values, src = live, 'valores do MPC a correr: "Aplicar" muda ja.'
+    def param_load_table(self, kind):
+        label = kind.upper()
+        node_name = 'mpc_controller' if kind == 'mpc' else 'dwa_global_follower'
+        user_file = USER_MPC_PARAMS if kind == 'mpc' else USER_DWA_PARAMS
+        files_fn = mpc_param_files if kind == 'mpc' else dwa_param_files
+        names = [n for n, *_ in self.param_spec(kind)]
+        cli = getattr(self.ros, f'{kind}_get', None) if self.ros else None
+        live = self.ros.get_params(kind, names) if cli and cli.service_is_ready() else None
+        if live is not None:
+            values, src = live, f'valores do {label} a correr: "Aplicar" muda ja.'
         else:
-            values = {n: d for n, _, _, _, d in self.mpc_spec()}
-            files = mpc_param_files()
-            values.update(read_param_files(files))
-            mine = os.path.isfile(USER_MPC_PARAMS)
-            src = ('MPC parado: valores dos ficheiros' + (' (com os teus, ' + USER_MPC_PARAMS + ')' if mine else '')
+            values = {n: d for n, _, _, _, d in self.param_spec(kind)}
+            files = files_fn()
+            values.update(read_param_files(files, node_name))
+            mine = os.path.isfile(user_file)
+            src = (f'{label} parado: valores dos ficheiros' + (' (com os teus, ' + user_file + ')' if mine else '')
                    + '. "Guardar" grava-os para o proximo arranque.')
-        self.mpc_src_lbl.setText(src)
-        self.mpc_table.blockSignals(True)
-        self.mpc_table.setRowCount(0)
-        self.mpc_rows = {}
-        for n, desc, lo, hi, default in self.mpc_spec():
-            r = self.mpc_table.rowCount()
-            self.mpc_table.insertRow(r)
+        getattr(self, f'{kind}_src_lbl').setText(src)
+        table = getattr(self, f'{kind}_table')
+        table.blockSignals(True)
+        table.setRowCount(0)
+        rows = {}
+        for n, desc, lo, hi, default in self.param_spec(kind):
+            r = table.rowCount()
+            table.insertRow(r)
             name_item = QTableWidgetItem(n)
             name_item.setFlags(Qt.ItemIsEnabled)
-            tip = desc + ('' if lo is None else f'  [{lo} .. {hi}]') + f'\npor defeito: {default}'
+            tip = desc + ('' if lo is None else f'  [{lo:g} .. {hi:g}]') + f'\npor defeito no codigo: {default}'
             name_item.setToolTip(tip)
             v = values.get(n, default)
             if isinstance(default, bool):
@@ -731,60 +800,87 @@ class MainWindow(QMainWindow):
                 it = QTableWidgetItem(f'{v:g}' if isinstance(v, float) else str(v))
                 it.setFlags(Qt.ItemIsEnabled | Qt.ItemIsEditable)
             it.setToolTip(tip)
-            self.mpc_table.setItem(r, 0, name_item)
-            self.mpc_table.setItem(r, 1, it)
-            self.mpc_rows[n] = it
-        self.mpc_table.blockSignals(False)
-        self._mpc_loaded = self.mpc_current()
+            table.setItem(r, 0, name_item)
+            table.setItem(r, 1, it)
+            rows[n] = it
+        setattr(self, f'{kind}_rows', rows)
+        table.blockSignals(False)
+        setattr(self, f'_{kind}_loaded', self.param_current(kind))
 
-    def on_mpc_edit(self, item):
-        name = next((n for n, it in self.mpc_rows.items() if it is item), None)
+    def on_param_edit(self, kind, item):
+        rows = getattr(self, f'{kind}_rows', {})
+        name = next((n for n, it in rows.items() if it is item), None)
         if name is None:
             return
         try:
-            changed = self._parse(name, item) != self._mpc_loaded.get(name)
+            changed = self._parse(kind, name, item) != getattr(self, f'_{kind}_loaded', {}).get(name)
             item.setBackground(QColor('#78350f') if changed else QColor('#1b1e24'))
         except ValueError as exc:
             item.setBackground(QColor('#7f1d1d'))
             self.log(str(exc))
 
-    def mpc_apply(self):
+    def param_apply(self, kind):
+        label = kind.upper()
         try:
-            cur = self.mpc_current()
+            cur = self.param_current(kind)
         except ValueError as exc:
-            QMessageBox.warning(self, 'MPC', str(exc))
+            QMessageBox.warning(self, label, str(exc))
             return
-        changed = {n: v for n, v in cur.items() if v != self._mpc_loaded.get(n)}
+        loaded = getattr(self, f'_{kind}_loaded', {})
+        changed = {n: v for n, v in cur.items() if v != loaded.get(n)}
         if not changed:
-            self.log('MPC: nada alterado')
+            self.log(f'{label}: nada alterado')
             return
-        if not (self.ros and self.ros.mpc_set.service_is_ready()):
-            self.log('o MPC nao esta a correr: usa "Guardar" para o proximo arranque')
+        cli = getattr(self.ros, f'{kind}_set', None) if self.ros else None
+        if not (cli and cli.service_is_ready()):
+            self.log(f'o {label} nao esta a correr: usa "Guardar" para o proximo arranque')
             return
-        res = self.ros.mpc_set_params(changed) or []
+        res = self.ros.set_params(kind, changed) or []
         for name, ok, reason in res:
-            self.log(f'MPC: {name} = {changed[name]}' if ok else f'MPC: {name} recusado ({reason})')
-        self.mpc_load_table()
-        self.redraw_obstacles()
+            self.log(f'{label}: {name} = {changed[name]}' if ok else f'{label}: {name} recusado ({reason})')
+        self.param_load_table(kind)
+        if kind == 'mpc':
+            self.redraw_obstacles()
+
+    def param_save(self, kind):
+        label = kind.upper()
+        user_file = USER_MPC_PARAMS if kind == 'mpc' else USER_DWA_PARAMS
+        node_name = 'mpc_controller' if kind == 'mpc' else 'dwa_global_follower'
+        try:
+            path = write_user_params(self.param_current(kind), user_file, node_name, label)
+        except ValueError as exc:
+            QMessageBox.warning(self, label, str(exc))
+            return
+        self.log(f'parametros do {label} gravados em {path} (usados sempre que o {label} arranca)')
+        self.param_apply(kind)
+
+    def param_reset(self, kind):
+        label = kind.upper()
+        user_file = USER_MPC_PARAMS if kind == 'mpc' else USER_DWA_PARAMS
+        node_name = 'mpc_controller' if kind == 'mpc' else 'dwa_global_follower'
+        files_fn = mpc_param_files if kind == 'mpc' else dwa_param_files
+        if os.path.isfile(user_file):
+            os.remove(user_file)
+            self.log(f'{user_file} apagado: voltam os de origem no proximo arranque do {label}')
+        cli = getattr(self.ros, f'{kind}_set', None) if self.ros else None
+        if cli and cli.service_is_ready():
+            defaults = {n: d for n, _, _, _, d in self.param_spec(kind)}
+            defaults.update(read_param_files(files_fn(), node_name))
+            self.ros.set_params(kind, defaults)
+        self.param_load_table(kind)
+
+    # Compatibilidade com chamadas/testes anteriores.
+    def mpc_load_table(self):
+        self.param_load_table('mpc')
+
+    def mpc_apply(self):
+        self.param_apply('mpc')
 
     def mpc_save(self):
-        try:
-            path = write_user_params(self.mpc_current())
-        except ValueError as exc:
-            QMessageBox.warning(self, 'MPC', str(exc))
-            return
-        self.log(f'parametros do MPC gravados em {path} (usados sempre que o MPC arranca)')
-        self.mpc_apply()
+        self.param_save('mpc')
 
     def mpc_reset(self):
-        if os.path.isfile(USER_MPC_PARAMS):
-            os.remove(USER_MPC_PARAMS)
-            self.log(f'{USER_MPC_PARAMS} apagado: voltam os de origem no proximo arranque do MPC')
-        if self.ros and self.ros.mpc_set.service_is_ready():
-            defaults = {n: d for n, _, _, _, d in self.mpc_spec()}
-            defaults.update(read_param_files(mpc_param_files()))
-            self.ros.mpc_set_params(defaults)
-        self.mpc_load_table()
+        self.param_reset('mpc')
 
     def closeEvent(self, ev):
         if self.ros:

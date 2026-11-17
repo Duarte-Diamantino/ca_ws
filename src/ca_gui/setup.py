@@ -14,7 +14,7 @@ setup(
     zip_safe=True,
     maintainer='Duarte Diamantino',
     maintainer_email='duarte.antonio.eu@gmail.com',
-    description='GUI da simulacao: mapa da pista, caminhos pela estrada, obstaculos, conduzir e afinar o MPC',
+    description='GUI da simulacao: mapa, caminhos, obstaculos, conduzir e afinar MPC/DWA',
     license='MIT',
     tests_require=['pytest'],
     entry_points={'console_scripts': ['ca_gui = ca_gui.app:main']},

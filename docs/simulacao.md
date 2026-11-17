@@ -39,6 +39,10 @@ MPC (amarelo). Roda do rato = zoom, botão do meio (ou modo **Mover**) = arrasta
 - **MPC (afinar)**: os parâmetros do MPC numa tabela (passa o rato por cima para ver o que são e os
   limites). Com o MPC a correr, **Aplicar** muda já; **Guardar (os meus)** grava-os para os próximos
   arranques; **Repor os de origem** apaga os teus.
+- **DWA (afinar)**: a mesma interface para todos os parâmetros dinâmicos do DWA (velocidade, horizonte,
+  amostras, pesos, segurança e desvio de obstáculos). **Aplicar** muda o DWA a correr e **Guardar (os
+  meus)** grava em `~/ca_ws/dwa_params.yaml` para os próximos arranques. Ao parar, as trajetórias do
+  DWA são apagadas do RViz; cada conjunto também expira sozinho se o processo terminar abruptamente.
 - A barra de baixo mostra sempre o carro (velocidade, pose) e o comando (velocidade, direção).
 - Só um conduz de cada vez (`/ca_sim/driver`): se um terminal assumir o carro, a GUI larga-o.
 - A GUI antiga continua disponível: `tools/sim.sh path:=gui_antigo`.
@@ -109,7 +113,7 @@ sem reiniciar o MPC; os de obstáculos/desvio recalculam logo o caminho desviado
 
 ### Afinar o DWA
 
-O `dwa_global_follower` também aceita mudanças com ele a correr:
+O `dwa_global_follower` também aceita mudanças com ele a correr, pelo separador **DWA (afinar)** ou com
 `ros2 param set /dwa_global_follower v_max 1.5` (ou `rqt_reconfigure`). O simulador arranca-o com
 `src/dwa_follower/config/dwa.yaml` (v_max 1,2, `window_pts` 15, `lookahead_dist` 1,2, `goal_tol` 0,3,
 obstáculos com tamanho) e depois `~/ca_ws/dwa_params.yaml`, se existir. Os principais: `v_max`,
@@ -139,13 +143,14 @@ comportamento antigo (só vê os obstáculos no horizonte de 1 s).
 ## O carro e o mundo no Gazebo (`ca_gazebo`)
 
 - **Carro: Traxxas 1/10 com as meshes do CAD** (repo `ca_sim_ros2`: `base_link.stl`, `roda_urfd_v3.stl`,
-  em mm → `scale 0.001`). O URDF antigo desse repo não tinha escala e punha as rodas a ±0,5 m.
+  em mm → `scale 0.001`). Existe um único modelo do carro:
+  `src/ca_gazebo/urdf/ca_car.urdf.xacro`.
   Medidas tiradas do carro montado (`CA_SIM/carro_com_rodas.stl`): **distância entre eixos 0,324 m**,
   bitola 0,1975 m, rodas de 109 mm (raio 0,0545), carroçaria 568 × 193 × 117 mm. Os controladores
   assumem 0,335 m (ver [calibrações](alteracoes.md#calibrações-diferentes-entre-mpc-e-dwa)). Colisões simples (caixa + esferas) para a física ser estável.
+  A carroçaria é recentrada pelos limites da STL (`y=28,5 mm`) para ficar simétrica relativamente às rodas.
   A mesh da carroçaria é um bloco simples: por cima tem detalhes só visuais (sem massa nem colisão):
-  vidros, retrovisores, faróis e farolins, para-choques, faixa no capot, aileron, lidar no tejadilho,
-  antena e jantes.
+  vidros, retrovisores, faróis e farolins, para-choques, faixa no capot, aileron, antena e jantes.
 - `base_link` = centro do eixo traseiro (a referência do modelo bicicleta).
 - Atuação "tipo VESC", sem ros2_control: o `ca_sim/vesc_to_gz` converte `/commands/motor/speed` e
   `/commands/servo/position` (com a calibração do controlador que está a conduzir) em
@@ -156,7 +161,7 @@ comportamento antigo (só vê os obstáculos no horizonte de 1 s).
   do Gazebo publicava a **1000 Hz** (um por passo de física); o `robot_state_publisher` transformava
   cada um em TF e o RViz ficava atrasado — era por isso que o URDF não voltava ao início com o **r**.
 - A odometria é a pose "verdadeira" do modelo (`OdometryPublisher`, frame `map`) — faz de EKF perfeito.
-  Ainda não há lidar nem ruído.
+  Não existe LiDAR no modelo nem sensores simulados com ruído.
 - **Mundo: um armazém** (15,8 × 13,4 m, paredes de 3,2 m) com a pista no chão (asfalto, linhas brancas,
   passadeira), pilares, 4 estantes com caixas, paletes, faixas amarelas no chão e 17 cones fora da
   estrada (a ~25 cm das linhas e a mais de 0,7 m do caminho Q — há um teste que o garante).

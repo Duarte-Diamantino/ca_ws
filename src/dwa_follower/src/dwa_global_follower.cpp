@@ -617,6 +617,12 @@ void DwaGlobalFollower::publishPathMarkers() const {
   visualization_msgs::msg::MarkerArray ma;
   auto now = this->now();
 
+  visualization_msgs::msg::Marker clear;
+  clear.action = visualization_msgs::msg::Marker::DELETEALL;
+  clear.ns = "";
+  clear.id = -1;
+  ma.markers.push_back(clear);
+
   for (size_t i = 0; i < path_pts_.size(); ++i) {
     double t = (path_pts_.size() > 1) ? (static_cast<double>(i) / (path_pts_.size() - 1)) : 0.0; // 0..1
     visualization_msgs::msg::Marker m;
@@ -637,6 +643,7 @@ void DwaGlobalFollower::publishPathMarkers() const {
     m.color.g = 0.0;
     m.color.b = 1.0 - t;
     m.color.a = 0.9;
+    m.lifetime.sec = 2;
     ma.markers.push_back(m);
   }
 
@@ -740,7 +747,13 @@ void DwaGlobalFollower::update() {
     std_msgs::msg::Float64 center;
     center.data = SERVO_C;
     steer_pub_->publish(center);
-    marker_pub_->publish(visualization_msgs::msg::MarkerArray());
+    visualization_msgs::msg::Marker clear;
+    clear.action = visualization_msgs::msg::Marker::DELETEALL;
+    clear.ns = "";
+    clear.id = -1;
+    visualization_msgs::msg::MarkerArray clear_all;
+    clear_all.markers.push_back(clear);
+    marker_pub_->publish(clear_all);
     return;
   }
 
@@ -753,6 +766,13 @@ void DwaGlobalFollower::update() {
   auto now = this->now();
   int id = 0;
   int steps = static_cast<int>(horizon_s_ / DT);
+
+  // Sem DELETEALL, os IDs que deixam de existir num ciclo ficam acumulados no RViz.
+  visualization_msgs::msg::Marker clear;
+  clear.action = visualization_msgs::msg::Marker::DELETEALL;
+  clear.ns = "";
+  clear.id = -1;
+  ma.markers.push_back(clear);
 
   // 1. Add green ball at robot position
   visualization_msgs::msg::Marker robot_marker;
@@ -1082,6 +1102,12 @@ void DwaGlobalFollower::update() {
   goal_marker.color.a = 1.0;
   ma.markers.push_back(goal_marker);
 
+  // Se o processo morrer sem conseguir publicar DELETEALL, os trajetos expiram sozinhos.
+  for (auto& marker : ma.markers) {
+    if (marker.action == visualization_msgs::msg::Marker::ADD) {
+      marker.lifetime.nanosec = 500000000;  // 0,5 s; o DWA atualiza a 10 Hz
+    }
+  }
   marker_pub_->publish(ma);
 
   // Publish commands

@@ -50,19 +50,20 @@ def mpc_param_files():
     return [f for f in files if os.path.isfile(f)]
 
 
-def read_param_files(files):
+def read_param_files(files, node_name='mpc_controller'):
     out = {}
     for f in files:
         with open(f) as fh:
             data = yaml.safe_load(fh) or {}
-        out.update(data.get('mpc_controller', {}).get('ros__parameters', {}))
+        out.update(data.get(node_name, {}).get('ros__parameters', {}))
     return out
 
 
-def write_user_params(values, path=USER_MPC_PARAMS):
-    lines = ['# Parametros do MPC gravados na GUI (ou no terminal do MPC, tecla g).',
-             '# Carregados depois de mpc_python/config/mpc.yaml. Apagar = voltar aos de origem.',
-             'mpc_controller:', '  ros__parameters:']
+def write_user_params(values, path=USER_MPC_PARAMS, node_name='mpc_controller', label='MPC'):
+    base = 'mpc_python/config/mpc.yaml' if node_name == 'mpc_controller' else 'dwa_follower/config/dwa.yaml'
+    lines = [f'# Parametros do {label} gravados na GUI.',
+             f'# Carregados depois de {base}. Apagar = voltar aos de origem.',
+             f'{node_name}:', '  ros__parameters:']
     for n, v in values.items():
         val = ('true' if v else 'false') if isinstance(v, bool) else str(v) if isinstance(v, int) else repr(float(v))
         lines.append(f'    {n}: {val}')
@@ -106,6 +107,7 @@ class RosBridge(QObject):
     driver = pyqtSignal(str)                           # quem conduz (/ca_sim/driver)
     log = pyqtSignal(str)
     controller_ended = pyqtSignal(str, int)            # tipo, codigo
+    gz_sync_done = pyqtSignal()
 
     def __init__(self, world='pista'):
         super().__init__()
@@ -121,6 +123,8 @@ class RosBridge(QObject):
         self.path_pub = n.create_publisher(Path, '/reference_path', latched)
         self.obst_pub = n.create_publisher(PoseArray, '/obstacles', 10)
         self.obst_marker_pub = n.create_publisher(MarkerArray, '/obstacles_marker', 10)
+        self.prediction_clear_pub = n.create_publisher(MarkerArray, '/predicted_trajectories', 10)
+        self.path_marker_clear_pub = n.create_publisher(MarkerArray, '/reference_path_markers', 10)
         self.speed_pub = n.create_publisher(Float64, '/commands/motor/speed', 10)
         self.steer_pub = n.create_publisher(Float64, '/commands/servo/position', 10)
         self.driver_pub = n.create_publisher(String, '/ca_sim/driver', latched)
@@ -133,13 +137,16 @@ class RosBridge(QObject):
         self.vesc_param = n.create_client(SetParameters, '/vesc_to_gz/set_parameters')
         self.mpc_get = n.create_client(GetParameters, '/mpc_controller/get_parameters')
         self.mpc_set = n.create_client(SetParameters, '/mpc_controller/set_parameters')
+        self.dwa_get = n.create_client(GetParameters, '/dwa_global_follower/get_parameters')
+        self.dwa_set = n.create_client(SetParameters, '/dwa_global_follower/set_parameters')
         self.path_msg = None
         self.obstacles = []
         self.proc = None
         self.proc_kind = None
         self.my_id = None
         self._gz = ThreadPoolExecutor(max_workers=1)
-        self._gz_pending = False                      # ja ha uma sincronizacao na fila
+        self._gz_pending = False                      # sincronizacao em fila ou a correr
+        self._gz_dirty = False                        # lista mudou enquanto sincronizava
         self._gz_closed = False
         self._gz_warned = set()
         self._create_exe = None
@@ -158,6 +165,7 @@ class RosBridge(QObject):
         self.gz_timer = QTimer(self)
         self.gz_timer.timeout.connect(self.request_gz_sync)
         self.gz_timer.start(GZ_RESYNC_MS)
+        self.gz_sync_done.connect(self._on_gz_sync_done)
         QTimer.singleShot(1500, self.request_gz_sync)
 
     # ------------------------------------------------------------------ ROS
@@ -233,22 +241,34 @@ class RosBridge(QObject):
     # ------------------------------------------------------------------ obstaculos
     def set_obstacles(self, obstacles):
         self.obstacles = list(obstacles)
+        self._gz_dirty = True
         self.publish_obstacles()
         self.request_gz_sync()
 
     def request_gz_sync(self):
-        """Sincroniza o Gazebo com self.obstacles (num thread; varios pedidos seguidos = um so)."""
+        """Sincroniza o Gazebo num thread; enquanto corre, pedidos repetidos sao agregados."""
         if self._gz_pending or self._gz_closed:
             return
         self._gz_pending = True
+        self._gz_dirty = False
+        obstacles = list(self.obstacles)
         try:
-            self._gz.submit(self._gz_job)
+            self._gz.submit(self._gz_job, obstacles)
         except RuntimeError:  # executor ja fechado
             self._gz_pending = False
 
-    def _gz_job(self):
+    def _gz_job(self, obstacles):
+        """Worker: nao altera flags do Qt; avisa a thread principal quando terminar."""
+        try:
+            self._sync_gazebo(obstacles)
+        finally:
+            self.gz_sync_done.emit()
+
+    def _on_gz_sync_done(self):
         self._gz_pending = False
-        self._sync_gazebo(list(self.obstacles))
+        if self._gz_dirty and not self._gz_closed:
+            # Da tempo ao UserCommands para aplicar a operacao anterior antes de voltar a ler a cena.
+            QTimer.singleShot(500, self.request_gz_sync)
 
     def publish_obstacles(self):
         pa = PoseArray()
@@ -256,7 +276,9 @@ class RosBridge(QObject):
         ma = MarkerArray()
         clear = Marker()
         clear.action = Marker.DELETEALL
-        clear.ns = 'obstacles'
+        # DELETEALL ignora namespace/id, mas o verificador do RViz conta duplicados dentro da mensagem.
+        # Usar uma chave diferente evita colidir com o primeiro cilindro ('obstacles', 0).
+        clear.ns, clear.id = '', -1
         ma.markers.append(clear)
         for i, (x, y, r) in enumerate(self.obstacles):
             p = Pose()
@@ -396,11 +418,24 @@ class RosBridge(QObject):
                 pass
         self.proc = None
         self.proc_kind = None
+        if rclpy.ok():
+            self.clear_controller_markers()
         if brake:
             for _ in range(3):
                 self.send_command(0.0, 0.5751)
 
-    # ------------------------------------------------------------------ parametros do MPC
+    def clear_controller_markers(self):
+        """Apaga no RViz as trajetorias e o caminho desviado deixados pelo MPC/DWA."""
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        clear.ns, clear.id = '', -1
+        msg = MarkerArray()
+        msg.markers.append(clear)
+        self.prediction_clear_pub.publish(msg)
+        self.path_marker_clear_pub.publish(msg)
+        self.prediction.emit([])
+
+    # ------------------------------------------------------------------ parametros dos controladores
     def _call(self, cli, req, timeout=2.0):
         if not cli.wait_for_service(timeout_sec=0.5):
             return None
@@ -408,10 +443,10 @@ class RosBridge(QObject):
         self.exec.spin_until_future_complete(fut, timeout_sec=timeout)
         return fut.result()
 
-    def mpc_get_params(self, names):
+    def get_params(self, kind, names):
         req = GetParameters.Request()
         req.names = list(names)
-        res = self._call(self.mpc_get, req)
+        res = self._call(self.mpc_get if kind == 'mpc' else self.dwa_get, req)
         if res is None:
             return None
         out = {}
@@ -424,7 +459,7 @@ class RosBridge(QObject):
                 out[n] = v.double_value
         return out
 
-    def mpc_set_params(self, values):
+    def set_params(self, kind, values):
         req = SetParameters.Request()
         for n, v in values.items():
             pv = ParameterValue()
@@ -435,10 +470,16 @@ class RosBridge(QObject):
             else:
                 pv.type, pv.double_value = ParameterType.PARAMETER_DOUBLE, float(v)
             req.parameters.append(Parameter(name=n, value=pv))
-        res = self._call(self.mpc_set, req)
+        res = self._call(self.mpc_set if kind == 'mpc' else self.dwa_set, req)
         if res is None:
             return None
         return [(p.name, r.successful, r.reason) for p, r in zip(req.parameters, res.results)]
+
+    def mpc_get_params(self, names):
+        return self.get_params('mpc', names)
+
+    def mpc_set_params(self, values):
+        return self.set_params('mpc', values)
 
     def shutdown(self):
         self.spin_timer.stop()

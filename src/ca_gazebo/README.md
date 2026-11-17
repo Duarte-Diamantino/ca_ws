@@ -6,6 +6,9 @@ Normalmente é aberto pelo `ca_sim` (`tools/sim.sh`). Só o Gazebo com o carro:
 ros2 launch ca_gazebo gazebo.launch.py gui:=true x:=-0.4 y:=0.0 yaw:=0.0
 ```
 
+O modelo único do carro é `urdf/ca_car.urdf.xacro`. Não existe outro URDF do carro nem LiDAR no
+modelo.
+
 | Ficheiro | |
 |---|---|
 | `urdf/ca_car.urdf.xacro` | Traxxas 1/10 com as meshes do CAD (`meshes/`, de `ca_sim_ros2`) e as medidas do carro montado (entre eixos 0,324 m). Servo da direção, colisões simples e detalhes só visuais |

@@ -6,7 +6,7 @@
   Medidas tiradas do carro montado (CA_SIM/carro_com_rodas.stl):
     eixos em x = 120 mm e 444 mm  -> distancia entre eixos 0.324 m (os controladores assumem 0.335)
     rodas: diametro 109 mm (raio 0.0545), largura 43 mm, centros a +-98.75 mm -> bitola 0.1975 m
-    linha central do carro em y = +17.75 mm do referencial da mesh; carrocaria 568 x 193 x 117 mm
+    centro lateral da carrocaria em y = +28.5 mm do referencial da mesh; carrocaria 568 x 193 x 117 mm
   Colisao: caixa (carrocaria) + esferas (rodas), mais estavel que as meshes.
 
   base_link = centro do eixo traseiro, a altura dos eixos (referencia do modelo bicicleta).
@@ -58,7 +58,7 @@
   <!-- Detalhes so visuais (sem colisao nem massa) por cima da mesh do CAD, que e um bloco simples.
        Coordenadas em relacao ao base_link (eixo traseiro); perfil da mesh nesse referencial:
        traseira x = -0.120 (z 0..0.051), rampa ate ao tejadilho x = 0.130..0.280 (z 0.118),
-       para-brisas ate x = 0.330 (z 0.071), capot ate a frente x = 0.448; lados y = -0.076/+0.097
+       para-brisas ate x = 0.330 (z 0.071), capot ate a frente x = 0.448; lados y = -0.0965/+0.0965
        a altura das janelas. -->
   <xacro:macro name="detalhe_caixa" params="x y z sx sy sz mat pitch:=0">
     <visual>
@@ -74,7 +74,7 @@
       <material name="${mat}"/>
     </visual>
   </xacro:macro>
-  <xacro:property name="yc" value="0.0105"/>   <!-- centro da carrocaria em y -->
+  <xacro:property name="yc" value="0.0"/>      <!-- centro da carrocaria, alinhado com base_link -->
 
   <link name="base_link"/>
 
@@ -86,19 +86,19 @@
                izz="${m_chassis * (cb_l**2 + cb_w**2) / 12}"/>
     </inertial>
     <visual>
-      <!-- referencial da mesh: eixo traseiro em (120, 17.75, ~0) mm -->
-      <origin xyz="${-0.120 - cb_x} -0.01775 ${0.001 - cb_z}"/>
+      <!-- referencial da mesh: eixo traseiro em x=120 mm; bbox lateral centrada em y=28.5 mm -->
+      <origin xyz="${-0.120 - cb_x} -0.0285 ${0.001 - cb_z}"/>
       <geometry><mesh filename="${meshes}/carro_base.stl" scale="0.001 0.001 0.001"/></geometry>
       <material name="carrocaria"/>
     </visual>
     <!-- vidros: para-brisas, oculo traseiro (na rampa) e janelas laterais -->
     <xacro:detalhe_caixa x="0.3064" y="${yc}" z="0.0960" sx="0.068" sy="0.160" sz="0.003" mat="vidro" pitch="0.7545"/>
     <xacro:detalhe_caixa x="0.0775" y="${yc}" z="0.1060" sx="0.098" sy="0.150" sz="0.003" mat="vidro" pitch="-0.2618"/>
-    <xacro:detalhe_caixa x="0.2025" y="0.0990" z="0.0985" sx="0.130" sy="0.003" sz="0.025" mat="vidro"/>
-    <xacro:detalhe_caixa x="0.2025" y="-0.0780" z="0.0985" sx="0.130" sy="0.003" sz="0.025" mat="vidro"/>
+    <xacro:detalhe_caixa x="0.2025" y="0.0885" z="0.0985" sx="0.130" sy="0.003" sz="0.025" mat="vidro"/>
+    <xacro:detalhe_caixa x="0.2025" y="-0.0885" z="0.0985" sx="0.130" sy="0.003" sz="0.025" mat="vidro"/>
     <!-- retrovisores -->
-    <xacro:detalhe_caixa x="0.2850" y="0.1050" z="0.0950" sx="0.012" sy="0.018" sz="0.012" mat="preto"/>
-    <xacro:detalhe_caixa x="0.2850" y="-0.0840" z="0.0950" sx="0.012" sy="0.018" sz="0.012" mat="preto"/>
+    <xacro:detalhe_caixa x="0.2850" y="0.0945" z="0.0950" sx="0.012" sy="0.018" sz="0.012" mat="preto"/>
+    <xacro:detalhe_caixa x="0.2850" y="-0.0945" z="0.0950" sx="0.012" sy="0.018" sz="0.012" mat="preto"/>
     <!-- farois a frente e farolins atras -->
     <xacro:detalhe_caixa x="0.4495" y="${yc + 0.055}" z="0.050" sx="0.003" sy="0.030" sz="0.014" mat="farol"/>
     <xacro:detalhe_caixa x="0.4495" y="${yc - 0.055}" z="0.050" sx="0.003" sy="0.030" sz="0.014" mat="farol"/>
@@ -111,13 +111,9 @@
     <xacro:detalhe_caixa x="-0.0950" y="${yc}" z="0.0980" sx="0.050" sy="0.200" sz="0.004" mat="preto" pitch="-0.12"/>
     <xacro:detalhe_caixa x="-0.0950" y="${yc + 0.060}" z="0.0780" sx="0.008" sy="0.004" sz="0.040" mat="preto"/>
     <xacro:detalhe_caixa x="-0.0950" y="${yc - 0.060}" z="0.0780" sx="0.008" sy="0.004" sz="0.040" mat="preto"/>
-    <!-- lidar no tejadilho (corpo, janela, tampa) -->
-    <xacro:detalhe_cilindro x="0.205" y="${yc}" z="0.1340" r="0.033" h="0.032" mat="cinza"/>
-    <xacro:detalhe_cilindro x="0.205" y="${yc}" z="0.1560" r="0.0325" h="0.012" mat="vidro"/>
-    <xacro:detalhe_cilindro x="0.205" y="${yc}" z="0.1650" r="0.034" h="0.006" mat="preto"/>
     <!-- antena do recetor na rampa traseira -->
-    <xacro:detalhe_cilindro x="-0.050" y="-0.050" z="0.1300" r="0.0015" h="0.120" mat="preto"/>
-    <xacro:detalhe_cilindro x="-0.050" y="-0.050" z="0.1920" r="0.0040" h="0.006" mat="farolim"/>
+    <xacro:detalhe_cilindro x="-0.050" y="-0.0605" z="0.1300" r="0.0015" h="0.120" mat="preto"/>
+    <xacro:detalhe_cilindro x="-0.050" y="-0.0605" z="0.1920" r="0.0040" h="0.006" mat="farolim"/>
     <collision>
       <geometry><box size="${cb_l} ${cb_w} ${cb_h}"/></geometry>
     </collision>

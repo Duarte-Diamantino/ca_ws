@@ -8,6 +8,8 @@ são os nós anteriores do TESE.
   `use_marker_size`), `/joy`.
 - **Publica:** `/commands/motor/speed`, `/commands/servo/position`, `/predicted_trajectories` e
   `/reference_path_markers` (o caminho, já desviado).
+- **RViz:** cada atualização limpa os marcadores anteriores; as trajetórias expiram em 0,5 s e a GUI
+  publica `DELETEALL` ao parar o controlador, para não deixar previsões antigas no ecrã.
 - **Parâmetros:** o `config/dwa.yaml` tem os do simulador (v_max 1,2 m/s...). No carro real, sem o
   ficheiro, ficam os valores do código. Todos mudam com o nó a correr.
 

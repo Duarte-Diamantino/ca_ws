@@ -60,6 +60,17 @@ def test_meshes_existem_e_estao_em_mm():
         assert m.get('scale') == '0.001 0.001 0.001', 'as STL do CAD estao em mm'
 
 
+def test_carrocaria_e_rodas_estao_centradas_lateralmente():
+    """A bbox da carroçaria tem centro y=28,5 mm; o visual tem de o pôr em y=0."""
+    root = urdf()
+    mesh_origin = root.find("link[@name='chassis']/visual/origin")
+    mesh_y = float(mesh_origin.get('xyz').split()[1])
+    assert mesh_y + 0.0285 == pytest.approx(0.0)
+    left = xyz(joint(root, 'rear_left_wheel_joint'))[1]
+    right = xyz(joint(root, 'rear_right_wheel_joint'))[1]
+    assert left + right == pytest.approx(0.0)
+
+
 def test_base_link_sem_massa_e_todas_as_outras_com():
     root = urdf()
     for link in root.findall('link'):
