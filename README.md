@@ -41,19 +41,19 @@ ca_ws/
 └── extras/   não é compilado: código antigo do CA_SIM e o semáforo da prova (Raspberry Pi)
 ```
 
-| Pacote (`src/`) | O que é | Origem |
-|---|---|---|
-| [`ca_gui`](src/ca_gui) | GUI da simulação (Qt): mapa à escala real, caminhos pela estrada, obstáculos no Gazebo, conduzir e afinar MPC/DWA, teclado | novo |
-| [`ca_sim`](src/ca_sim) | Carro simulado (cinemático ou Gazebo), ponte VESC→Gazebo, terminais de condução, monitor PASS/FAIL, launches | novo |
-| [`ca_gazebo`](src/ca_gazebo) | Carro 1/10 para o Gazebo Fortress (modelo URDF/Xacro único com CAD, rodas e servo), mundo com a pista, bridge | novo |
-| [`mpc_python`](src/mpc_python) | MPC (scipy L-BFGS-B, modelo bicicleta): segue `/reference_path` e contorna `/obstacles` | TESE |
-| [`dwa_follower`](src/dwa_follower) | DWA (C++): `dwa_global_follower` segue `/reference_path` e contorna os obstáculos | TESE |
-| [`obstacle_publisher`](src/obstacle_publisher) | Obstáculos fixos (`positions:=[x1,y1,...]`) | TESE |
-| [`pickup_description`](src/pickup_description) | Mapas da pista (incl. o do Afonso), `map_server`, caminhos de teste (Q, spline, retângulo), URDF simples | TESE |
-| [`spline_visualizer`](src/spline_visualizer) | Desenha uma parábola no RViz | TESE |
-| [`gui_pista`](src/gui_pista) | GUI antiga (Tkinter): imagem da pista → Hybrid A\* + DWA + MPC + linha de corrida | GUI_pista |
-| [`point_cloud_processor`](src/point_cloud_processor) | **Afonso Oliveira.** Carro real: mapa da pista + AMCL (localização global), EKF, localização pelas linhas (ZED), mapas a partir da nuvem de pontos, deteção de sinais | fnr_thesis |
-| [`led_controller`](src/led_controller) | LEDs do carro conforme o sinal de trânsito detetado (`/signal`) | ca_sim_ros2 |
+| Pacote (`src/`) | O que é |
+|---|---|
+| [`ca_gui`](src/ca_gui) | GUI da simulação (Qt): mapa à escala real, caminhos pela estrada, obstáculos no Gazebo, conduzir e afinar MPC/DWA, teclado |
+| [`ca_sim`](src/ca_sim) | Carro simulado (cinemático ou Gazebo), ponte VESC→Gazebo, terminais de condução, monitor PASS/FAIL, launches |
+| [`ca_gazebo`](src/ca_gazebo) | Carro 1/10 para o Gazebo Fortress (modelo URDF/Xacro único com CAD, rodas e servo), mundo com a pista, bridge |
+| [`mpc_python`](src/mpc_python) | MPC (scipy L-BFGS-B, modelo bicicleta): segue `/reference_path` e contorna `/obstacles` |
+| [`dwa_follower`](src/dwa_follower) | DWA (C++): `dwa_global_follower` segue `/reference_path` e contorna os obstáculos |
+| [`obstacle_publisher`](src/obstacle_publisher) | Obstáculos fixos (`positions:=[x1,y1,...]`) |
+| [`pickup_description`](src/pickup_description) | Mapas da pista (incl. o do Afonso), `map_server`, caminhos de teste (Q, spline, retângulo), URDF simples |
+| [`spline_visualizer`](src/spline_visualizer) | Desenha uma parábola no RViz |
+| [`gui_pista`](src/gui_pista) | GUI antiga (Tkinter): imagem da pista → Hybrid A\* + DWA + MPC + linha de corrida |
+| [`point_cloud_processor`](src/point_cloud_processor) | **Afonso Oliveira.** Carro real: mapa da pista + AMCL (localização global), EKF, localização pelas linhas (ZED), mapas a partir da nuvem de pontos, deteção de sinais |
+| [`led_controller`](src/led_controller) | LEDs do carro conforme o sinal de trânsito detetado (`/signal`) |
 
 ## Documentação
 
@@ -68,15 +68,6 @@ ca_ws/
 | [docs/README.md](docs/README.md) | índice completo (inclui as notas antigas do CA_SIM) |
 
 ## Origem
-
-| Repositório | Commit | Para onde foi |
-|---|---|---|
-| [Duarte-Diamantino/TESE](https://github.com/Duarte-Diamantino/TESE) | `653131a` | `src/mpc_python`, `dwa_follower`, `obstacle_publisher`, `pickup_description`, `spline_visualizer`; `tools/manual_control.py` |
-| [Duarte-Diamantino/GUI_pista](https://github.com/Duarte-Diamantino/GUI_pista) | `d61a0cd` | `src/gui_pista` |
-| [Duarte-Diamantino/CA_SIM](https://github.com/Duarte-Diamantino/CA_SIM) | `ecbc295` | notas em `docs/`, código antigo em `extras/CA_SIM`, medidas do carro para o `ca_gazebo` |
-| [Duarte-Diamantino/ca_sim_ros2](https://github.com/Duarte-Diamantino/ca_sim_ros2) | `c29202d` | `src/led_controller`; meshes do CAD integradas no modelo único do `ca_gazebo` |
-| [Duarte-Diamantino/semaforo_CA_FNR](https://github.com/Duarte-Diamantino/semaforo_CA_FNR) | `95a5bab` | `extras/semaforo_CA_FNR` |
-| [olivas-afonso/fnr_thesis](https://github.com/olivas-afonso/fnr_thesis) (Afonso Oliveira) | `e0570de` | `src/point_cloud_processor` (sem os pesos `.onnx`, 231 MB) |
 
 Os repositórios originais continuam no GitHub, com o histórico. O mapa da pista do Afonso
 (`fnr_thesis/maps/map.png`) já vinha no TESE como `pickup_description/maps/map.pgm` (igual pixel a
